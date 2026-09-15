@@ -71,7 +71,28 @@ type SQSConfig struct {
 	PublisherSecretAccessKey string
 
 	StartupTimeout time.Duration
+	Consumer       SQSConsumerConfig
 }
+
+// SQSConsumerConfig bounds the input worker. VisibilityTimeout must remain
+// longer than ProcessingTimeout so a healthy worker has exclusive ownership
+// of a FIFO message while its database transaction is still in flight.
+type SQSConsumerConfig struct {
+	Enabled           bool
+	PollWait          time.Duration
+	Concurrency       int
+	VisibilityTimeout time.Duration
+	ProcessingTimeout time.Duration
+	RetryBase         time.Duration
+	RetryMax          time.Duration
+	ShutdownTimeout   time.Duration
+	ProviderAllowlist []string
+}
+
+// SQSConsumerPostCancelDrain is the bounded time spent releasing received
+// message visibility after cancelling workers. It is part of the Fx stop
+// budget because the release happens before dependent clients may close.
+const SQSConsumerPostCancelDrain = 5 * time.Second
 
 // OutboxConfig bounds how much work one publisher claims and how long a
 // crashed publisher can hold that work before another instance resumes it.
@@ -130,7 +151,7 @@ var rootAccessKeyID12Digits = regexp.MustCompile(`^\d{12}$`)
 // Load moments later, when the Fx graph is built.
 func StopTimeoutFromEnv() time.Duration {
 	var discarded []error
-	return getDuration("FX_STOP_TIMEOUT", 30*time.Second, &discarded)
+	return getDuration("FX_STOP_TIMEOUT", 45*time.Second, &discarded)
 }
 
 // Load reads the configuration from the process environment and validates
@@ -204,6 +225,21 @@ func Load() (Config, error) {
 	requireRoleCredentials(&errs, "SQS_PUBLISHER", cfg.SQS.PublisherAccessKeyID, cfg.SQS.PublisherSecretAccessKey)
 
 	cfg.SQS.StartupTimeout = getDuration("SQS_STARTUP_TIMEOUT", 10*time.Second, &errs)
+	cfg.SQS.Consumer.Enabled = getBool("SQS_CONSUMER_ENABLED", true, &errs)
+	cfg.SQS.Consumer.PollWait = getDuration("SQS_CONSUMER_POLL_WAIT", 20*time.Second, &errs)
+	cfg.SQS.Consumer.Concurrency = getInt("SQS_CONSUMER_CONCURRENCY", 10, &errs)
+	cfg.SQS.Consumer.VisibilityTimeout = getDuration("SQS_CONSUMER_VISIBILITY_TIMEOUT", 30*time.Second, &errs)
+	cfg.SQS.Consumer.ProcessingTimeout = getDuration("SQS_CONSUMER_PROCESSING_TIMEOUT", 20*time.Second, &errs)
+	cfg.SQS.Consumer.RetryBase = getDuration("SQS_CONSUMER_RETRY_BASE", time.Second, &errs)
+	cfg.SQS.Consumer.RetryMax = getDuration("SQS_CONSUMER_RETRY_MAX", time.Minute, &errs)
+	cfg.SQS.Consumer.ShutdownTimeout = getDuration("SQS_CONSUMER_SHUTDOWN_TIMEOUT", 15*time.Second, &errs)
+	cfg.SQS.Consumer.ProviderAllowlist = getCSV("SQS_CONSUMER_PROVIDER_ALLOWLIST", "provider-a,provider-b", &errs)
+	if cfg.SQS.Consumer.VisibilityTimeout <= cfg.SQS.Consumer.ProcessingTimeout {
+		errs = append(errs, fmt.Errorf("SQS_CONSUMER_VISIBILITY_TIMEOUT: must be greater than SQS_CONSUMER_PROCESSING_TIMEOUT"))
+	}
+	if cfg.SQS.Consumer.RetryMax < cfg.SQS.Consumer.RetryBase {
+		errs = append(errs, fmt.Errorf("SQS_CONSUMER_RETRY_MAX: must be greater than or equal to SQS_CONSUMER_RETRY_BASE"))
+	}
 
 	cfg.Outbox.PollInterval = getDuration("OUTBOX_POLL_INTERVAL", 250*time.Millisecond, &errs)
 	cfg.Outbox.Lease = getDuration("OUTBOX_LEASE", 30*time.Second, &errs)
@@ -233,16 +269,15 @@ func Load() (Config, error) {
 	// here is generous rather than matched to SQS_STARTUP_TIMEOUT's 10s.
 	cfg.Auth.DiscoveryTimeout = getDuration("AUTH_DISCOVERY_TIMEOUT", 45*time.Second, &errs)
 
-	cfg.Fx.StopTimeout = getDuration("FX_STOP_TIMEOUT", 30*time.Second, &errs)
+	cfg.Fx.StopTimeout = getDuration("FX_STOP_TIMEOUT", 45*time.Second, &errs)
 
 	// internalStopDeadline sums every stop-side deadline the shutdown
-	// sequence already waits on before the pools close - today just the HTTP
-	// drain. fx.StopTimeout must exceed that sum, or the Fx-wide deadline can
+	// sequence already waits on before the pools close. fx.StopTimeout must exceed that sum, or the Fx-wide deadline can
 	// expire while a component is still draining within its own, smaller
 	// budget (spec: "fx.StopTimeout configurado acima da soma dos prazos
 	// internos"). Extend this sum if a future stop hook gains its own
 	// configurable deadline.
-	internalStopDeadline := cfg.HTTP.ShutdownTimeout
+	internalStopDeadline := cfg.HTTP.ShutdownTimeout + cfg.SQS.Consumer.ShutdownTimeout + SQSConsumerPostCancelDrain
 	if cfg.Fx.StopTimeout <= internalStopDeadline {
 		errs = append(errs, fmt.Errorf("FX_STOP_TIMEOUT: must be greater than the sum of internal stop deadlines (%s), got %s", internalStopDeadline, cfg.Fx.StopTimeout))
 	}
@@ -331,4 +366,41 @@ func getInt(key string, fallback int, errs *[]error) int {
 		return fallback
 	}
 	return n
+}
+
+func getBool(key string, fallback bool, errs *[]error) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		*errs = append(*errs, fmt.Errorf("%s: invalid boolean %q", key, v))
+		return fallback
+	}
+	return b
+}
+
+func getCSV(key, fallback string, errs *[]error) []string {
+	v := getEnv(key, fallback)
+	values := strings.Split(v, ",")
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			*errs = append(*errs, fmt.Errorf("%s: provider allowlist contains an empty value", key))
+			continue
+		}
+		if _, duplicate := seen[value]; duplicate {
+			*errs = append(*errs, fmt.Errorf("%s: duplicate provider %q", key, value))
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		*errs = append(*errs, fmt.Errorf("%s: must contain at least one provider", key))
+	}
+	return result
 }

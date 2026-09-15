@@ -59,6 +59,25 @@ deduplicar por `eventId` mesmo fora da janela de cinco minutos do FIFO e usar
 `walletVersion` para ordenar projeções de saldo: uma republicação após lease
 expirado pode chegar depois de um evento mais novo.
 
+## Entrada SQS de operações
+
+O gateway interno publica `WagerTransactionRequested` em
+`wager-transactions.fifo`. `data.idempotencyKey` é a mesma chave usada no
+HTTP e fica fora do hash canônico; `messageId` é a identidade durável da
+inbox. O produtor define `MessageGroupId = walletId` e
+`MessageDeduplicationId = messageId`.
+
+O consumidor confirma o `DeleteMessage` somente depois do commit conjunto da
+inbox, operação, ledger e outbox. `SQS_CONSUMER_CONCURRENCY`,
+`SQS_CONSUMER_VISIBILITY_TIMEOUT`, `SQS_CONSUMER_PROCESSING_TIMEOUT`,
+`SQS_CONSUMER_RETRY_BASE`, `SQS_CONSUMER_RETRY_MAX`,
+`WAGER_TRANSACTIONS_MAX_RECEIVE_COUNT` e `SQS_CONSUMER_SHUTDOWN_TIMEOUT`
+ajustam respectivamente paralelismo, ownership, prazo, backoff, redrive e
+drain; o visibility timeout precisa ser maior que o prazo de processamento.
+`WAGER_TRANSACTIONS_MAX_RECEIVE_COUNT` é lida exclusivamente pelo
+`deploy/ministack/provision.sh` para a `RedrivePolicy` da fila, não pelo
+processo Go.
+
 ## Variáveis de ambiente
 
 Ver `.env.example`. `docker compose` lê um `.env` na raiz automaticamente;
@@ -171,6 +190,13 @@ como o único lugar autorizado a usar a chave root:
   da fila de produção. Tem também `sqs:DeleteMessage`, mas restrito à ARN da
   fila DLQ descartável - o suficiente para remover a mensagem que o próprio
   teste redirecionou para lá, sem nunca poder apagar da fila de entrada.
+- **`dlq-reader`**: leitor da DLQ de operações, com apenas
+  `ReceiveMessage` e `DeleteMessage` na ARN de
+  `wager-transactions-dlq.fifo`. Ele permite que o seam 3a correlacione e
+  remova uma falha permanente explícita sem ampliar o papel do consumidor.
+- **`consumer-fixture`**: consumidor do par descartável de redrive, com
+  receive/delete/change-visibility na entrada e send na DLQ. O teste o usa
+  contra um Postgres inalcançável; a aplicação nunca recebe essas chaves.
 
 Nenhum desses usuários, filas ou chaves participa do Compose da aplicação;
 eles existem só para o `test/integration` rodar sem tocar na chave root.

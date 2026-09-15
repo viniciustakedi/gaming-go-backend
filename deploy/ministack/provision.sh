@@ -198,6 +198,14 @@ READER_POLICY="$(policy "$(allow '["sqs:ReceiveMessage","sqs:DeleteMessage"]' "$
 aws_root iam put-user-policy --user-name events-reader --policy-name events-reader-sqs --policy-document "$READER_POLICY" >/dev/null
 ensure_access_key events-reader EVENTS_READER_ACCESS_KEY_ID EVENTS_READER_SECRET_ACCESS_KEY
 
+# This reader exists only so seam 3a can observe an explicitly dead-lettered
+# production-queue message without granting a test client a broader policy.
+# Queue URLs are built directly in the test, so GetQueueUrl is not needed.
+ensure_user dlq-reader
+DLQ_READER_POLICY="$(policy "$(allow '["sqs:ReceiveMessage","sqs:DeleteMessage"]' "$(arn "$DLQ_QUEUE")")")"
+aws_root iam put-user-policy --user-name dlq-reader --policy-name dlq-reader-sqs --policy-document "$DLQ_READER_POLICY" >/dev/null
+ensure_access_key dlq-reader DLQ_READER_ACCESS_KEY_ID DLQ_READER_SECRET_ACCESS_KEY
+
 # --- IAM test fixtures (test-only, never mounted into the app) ---
 
 ensure_user deny-probe
@@ -221,6 +229,13 @@ ensure_user redrive-tester
 REDRIVE_TESTER_STMT="$(allow '["sqs:SendMessage","sqs:ReceiveMessage"]' "$(arn "$REDRIVE_IN_QUEUE")"),$(allow '["sqs:SendMessage","sqs:ReceiveMessage","sqs:DeleteMessage"]' "$(arn "$REDRIVE_DLQ_QUEUE")")"
 aws_root iam put-user-policy --user-name redrive-tester --policy-name redrive-tester-sqs --policy-document "$(policy "$REDRIVE_TESTER_STMT")" >/dev/null
 ensure_access_key redrive-tester REDRIVE_TESTER_ACCESS_KEY_ID REDRIVE_TESTER_SECRET_ACCESS_KEY
+
+# The real consumer is pointed at this disposable pair while its database is
+# intentionally unreachable. The redrive-tester remains the producer/reader.
+ensure_user consumer-fixture
+CONSUMER_FIXTURE_STMT="$(allow '["sqs:ReceiveMessage","sqs:DeleteMessage","sqs:ChangeMessageVisibility","sqs:GetQueueUrl","sqs:GetQueueAttributes"]' "$(arn "$REDRIVE_IN_QUEUE")"),$(allow '["sqs:SendMessage","sqs:GetQueueUrl"]' "$(arn "$REDRIVE_DLQ_QUEUE")")"
+aws_root iam put-user-policy --user-name consumer-fixture --policy-name consumer-fixture-sqs --policy-document "$(policy "$CONSUMER_FIXTURE_STMT")" >/dev/null
+ensure_access_key consumer-fixture CONSUMER_FIXTURE_ACCESS_KEY_ID CONSUMER_FIXTURE_SECRET_ACCESS_KEY
 
 echo "provisioning: writing credential files"
 
@@ -255,10 +270,14 @@ GATEWAY_ACCESS_KEY_ID=${GATEWAY_ACCESS_KEY_ID}
 GATEWAY_SECRET_ACCESS_KEY=${GATEWAY_SECRET_ACCESS_KEY}
 EVENTS_READER_ACCESS_KEY_ID=${EVENTS_READER_ACCESS_KEY_ID}
 EVENTS_READER_SECRET_ACCESS_KEY=${EVENTS_READER_SECRET_ACCESS_KEY}
+DLQ_READER_ACCESS_KEY_ID=${DLQ_READER_ACCESS_KEY_ID}
+DLQ_READER_SECRET_ACCESS_KEY=${DLQ_READER_SECRET_ACCESS_KEY}
 DENY_PROBE_ACCESS_KEY_ID=${DENY_PROBE_ACCESS_KEY_ID}
 DENY_PROBE_SECRET_ACCESS_KEY=${DENY_PROBE_SECRET_ACCESS_KEY}
 REDRIVE_TESTER_ACCESS_KEY_ID=${REDRIVE_TESTER_ACCESS_KEY_ID}
 REDRIVE_TESTER_SECRET_ACCESS_KEY=${REDRIVE_TESTER_SECRET_ACCESS_KEY}
+CONSUMER_FIXTURE_ACCESS_KEY_ID=${CONSUMER_FIXTURE_ACCESS_KEY_ID}
+CONSUMER_FIXTURE_SECRET_ACCESS_KEY=${CONSUMER_FIXTURE_SECRET_ACCESS_KEY}
 IAM_TEST_DENY_PROBE_QUEUE_NAME=${DENY_PROBE_QUEUE}
 IAM_TEST_REDRIVE_INPUT_QUEUE_NAME=${REDRIVE_IN_QUEUE}
 IAM_TEST_REDRIVE_DLQ_QUEUE_NAME=${REDRIVE_DLQ_QUEUE}

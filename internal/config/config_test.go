@@ -192,6 +192,19 @@ func TestLoad_RejectsInsufficientStopTimeout(t *testing.T) {
 	}
 }
 
+func TestLoad_RequiresPostCancellationDrainBudget(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+	t.Setenv("HTTP_SHUTDOWN_TIMEOUT", "10s")
+	t.Setenv("SQS_CONSUMER_SHUTDOWN_TIMEOUT", "10s")
+	t.Setenv("FX_STOP_TIMEOUT", "25s")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("want error when FX_STOP_TIMEOUT leaves no post-cancellation drain budget")
+	}
+}
+
 func TestLoad_InvalidLogLevel(t *testing.T) {
 	for k, v := range validEnv(t) {
 		t.Setenv(k, v)

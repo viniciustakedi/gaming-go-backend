@@ -97,7 +97,8 @@ services:
 
   # One-shot: creates the queues, the DLQ redrive, the four least-privilege
   # IAM users (gateway, consumer, publisher, events-reader) and the IAM test
-  # fixtures (deny-probe, redrive-tester - see provision.sh), then writes
+  # fixtures (deny-probe, redrive-tester, dlq-reader, consumer-fixture - see
+  # provision.sh), then writes
   # two credential files under deploy/ministack/.runtime - bind-mounted, not
   # a named volume, so `go test -tags integration ./...` run straight from
   # the host can read the test one. It is the only service in this whole

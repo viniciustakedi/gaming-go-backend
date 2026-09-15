@@ -53,12 +53,14 @@ import (
 )
 
 type roleCreds struct {
-	gatewayKey, gatewaySecret           string
-	consumerKey, consumerSecret         string
-	publisherKey, publisherSecret       string
-	eventsReaderKey, eventsReaderSecret string
-	denyProbeKey, denyProbeSecret       string
-	redriveKey, redriveSecret           string
+	gatewayKey, gatewaySecret                 string
+	consumerKey, consumerSecret               string
+	publisherKey, publisherSecret             string
+	eventsReaderKey, eventsReaderSecret       string
+	denyProbeKey, denyProbeSecret             string
+	redriveKey, redriveSecret                 string
+	dlqReaderKey, dlqReaderSecret             string
+	consumerFixtureKey, consumerFixtureSecret string
 
 	denyProbeQueueName     string
 	redriveInputQueueName  string
@@ -121,18 +123,22 @@ func loadTestCreds(t *testing.T) roleCreds {
 	}
 
 	return roleCreds{
-		gatewayKey:         get("GATEWAY_ACCESS_KEY_ID"),
-		gatewaySecret:      get("GATEWAY_SECRET_ACCESS_KEY"),
-		consumerKey:        get("SQS_CONSUMER_ACCESS_KEY_ID"),
-		consumerSecret:     get("SQS_CONSUMER_SECRET_ACCESS_KEY"),
-		publisherKey:       get("SQS_PUBLISHER_ACCESS_KEY_ID"),
-		publisherSecret:    get("SQS_PUBLISHER_SECRET_ACCESS_KEY"),
-		eventsReaderKey:    get("EVENTS_READER_ACCESS_KEY_ID"),
-		eventsReaderSecret: get("EVENTS_READER_SECRET_ACCESS_KEY"),
-		denyProbeKey:       get("DENY_PROBE_ACCESS_KEY_ID"),
-		denyProbeSecret:    get("DENY_PROBE_SECRET_ACCESS_KEY"),
-		redriveKey:         get("REDRIVE_TESTER_ACCESS_KEY_ID"),
-		redriveSecret:      get("REDRIVE_TESTER_SECRET_ACCESS_KEY"),
+		gatewayKey:            get("GATEWAY_ACCESS_KEY_ID"),
+		gatewaySecret:         get("GATEWAY_SECRET_ACCESS_KEY"),
+		consumerKey:           get("SQS_CONSUMER_ACCESS_KEY_ID"),
+		consumerSecret:        get("SQS_CONSUMER_SECRET_ACCESS_KEY"),
+		publisherKey:          get("SQS_PUBLISHER_ACCESS_KEY_ID"),
+		publisherSecret:       get("SQS_PUBLISHER_SECRET_ACCESS_KEY"),
+		eventsReaderKey:       get("EVENTS_READER_ACCESS_KEY_ID"),
+		eventsReaderSecret:    get("EVENTS_READER_SECRET_ACCESS_KEY"),
+		denyProbeKey:          get("DENY_PROBE_ACCESS_KEY_ID"),
+		denyProbeSecret:       get("DENY_PROBE_SECRET_ACCESS_KEY"),
+		redriveKey:            get("REDRIVE_TESTER_ACCESS_KEY_ID"),
+		redriveSecret:         get("REDRIVE_TESTER_SECRET_ACCESS_KEY"),
+		dlqReaderKey:          get("DLQ_READER_ACCESS_KEY_ID"),
+		dlqReaderSecret:       get("DLQ_READER_SECRET_ACCESS_KEY"),
+		consumerFixtureKey:    get("CONSUMER_FIXTURE_ACCESS_KEY_ID"),
+		consumerFixtureSecret: get("CONSUMER_FIXTURE_SECRET_ACCESS_KEY"),
 
 		denyProbeQueueName:     get("IAM_TEST_DENY_PROBE_QUEUE_NAME"),
 		redriveInputQueueName:  get("IAM_TEST_REDRIVE_INPUT_QUEUE_NAME"),

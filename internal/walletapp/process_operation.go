@@ -79,6 +79,7 @@ type ProcessOperationResult struct {
 	FailureCode      string
 	Balance          money.Money
 	IdempotentReplay bool
+	kind             domainwallet.WagerKind
 }
 
 // PreparedOperation is Prepare's result: an input already validated and
@@ -230,11 +231,22 @@ func (uc *ProcessOperationUseCase) Process(ctx context.Context, input ProcessOpe
 		return ProcessOperationResult{}, err
 	}
 
-	uc.metrics.ObserveOperation(input.Channel, string(input.Request.Kind), string(result.Status), uc.now().Sub(started))
-	if result.IdempotentReplay {
-		uc.metrics.ObserveDuplicate(input.Channel)
-	}
+	uc.RecordOutcome(input.Channel, result, nil, uc.now().Sub(started))
 	return result, nil
+}
+
+// RecordOutcome records the observability side effects of a completed
+// operation. HTTP calls it through Process, while the SQS adapter calls it
+// only after committing its inbox transaction, so both transports contribute
+// to the same channel-labelled operation, replay, and latency metrics.
+func (uc *ProcessOperationUseCase) RecordOutcome(channel string, result ProcessOperationResult, err error, duration time.Duration) {
+	if err != nil {
+		return
+	}
+	uc.metrics.ObserveOperation(channel, string(result.kind), string(result.Status), duration)
+	if result.IdempotentReplay {
+		uc.metrics.ObserveDuplicate(channel)
+	}
 }
 
 // processWithRetry runs ExecuteInTx inside one fresh transaction and, on a
@@ -327,6 +339,7 @@ func (uc *ProcessOperationUseCase) lookupExisting(ctx context.Context, repos Rep
 	switch classification.Kind {
 	case operation.Replay:
 		result, err := replayResult(byKey)
+		result.kind = req.Kind
 		return result, true, err
 	case operation.AttemptConflict:
 		return ProcessOperationResult{}, true, classification.Error
@@ -468,7 +481,7 @@ func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Reposit
 	if err != nil {
 		return ProcessOperationResult{}, false, fmt.Errorf("%w: %v", ErrCorruptedResultingBalance, err)
 	}
-	result := ProcessOperationResult{TransactionID: transactionID, Status: transaction.Status(), FailureCode: transaction.FailureCode(), Balance: balance}
+	result := ProcessOperationResult{TransactionID: transactionID, Status: transaction.Status(), FailureCode: transaction.FailureCode(), Balance: balance, kind: req.Kind}
 	return result, false, nil
 }
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/auth"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/config"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/consumer"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/httpapi"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/logging"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/metrics"
@@ -32,6 +33,7 @@ var Modules = fx.Options(
 	auth.Module,
 	wageringmetrics.Module,
 	walletpg.Module,
+	consumer.Module,
 	outboxpg.Module,
 	outbox.Module,
 	httpapi.Module,

@@ -4,6 +4,7 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"os"
@@ -30,6 +31,8 @@ type appHarness struct {
 	client     *http.Client
 	pool       *pgxpool.Pool
 	adminToken string
+	fxApp      *fxtest.App
+	stopped    bool
 }
 
 // newAppHarness starts one fx.App per call, on its own free port, and
@@ -51,14 +54,33 @@ func newAppHarness(t *testing.T) *appHarness {
 	var pool *pgxpool.Pool
 	fxApp := fxtest.New(t, app.Modules, fx.Populate(&server, &pool))
 	fxApp.RequireStart()
-	t.Cleanup(fxApp.RequireStop)
-
-	return &appHarness{
+	h := &appHarness{
 		baseURL:    "http://" + server.Addr(),
 		client:     &http.Client{Timeout: 10 * time.Second},
 		pool:       pool,
 		adminToken: fetchToken(t, walletServiceClient()),
+		fxApp:      fxApp,
 	}
+	t.Cleanup(func() {
+		if !h.stopped {
+			if err := h.stop(t, context.Background()); err != nil {
+				t.Errorf("stop Fx app: %v", err)
+			}
+		}
+	})
+	return h
+}
+
+// stop lets the SQS lifecycle tests initiate the same Fx shutdown a SIGTERM
+// causes while a message is running. Ordinary harness users keep the usual
+// t.Cleanup stop; the bool prevents a second Stop after a test drove one.
+func (h *appHarness) stop(t *testing.T, ctx context.Context) error {
+	t.Helper()
+	if h.stopped {
+		return nil
+	}
+	h.stopped = true
+	return h.fxApp.Stop(ctx)
 }
 
 // do issues one HTTP request against the running app and returns the

@@ -125,6 +125,23 @@ func wageringDuplicateAttemptsMetric(t *testing.T, h *appHarness, channel string
 	return 0
 }
 
+func wageringOperationsMetric(t *testing.T, h *appHarness, channel, kind, status string) float64 {
+	t.Helper()
+	resp, body := h.do(t, http.MethodGet, "/metrics", nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d, want 200", resp.StatusCode)
+	}
+	prefix := fmt.Sprintf(`wagering_operations_total{channel="%s",kind="%s",status="%s"} `, channel, kind, status)
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			value, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, prefix)), 64)
+			requireNoError(t, err, "parse wagering_operations_total value")
+			return value
+		}
+	}
+	return 0
+}
+
 func queryWagerTransaction(t *testing.T, ctx context.Context, h *appHarness, id string) (status, failureCode string, resultingBalance *int64, found bool) {
 	t.Helper()
 	err := h.pool.QueryRow(ctx, `SELECT status, failure_code, resulting_balance FROM wager_transactions WHERE id = $1`, id).Scan(&status, &failureCode, &resultingBalance)
