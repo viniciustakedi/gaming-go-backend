@@ -1,2 +1,3 @@
 /deploy/ministack/.runtime/
+/deploy/postgres/.runtime/
 .env

@@ -5,4 +5,5 @@
 .reviews
 .scratch
 deploy/ministack/.runtime
+deploy/postgres/.runtime
 README.md
