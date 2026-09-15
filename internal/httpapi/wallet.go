@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -17,6 +20,30 @@ import (
 type openWalletRequest struct {
 	PlayerID       string      `json:"playerId"`
 	InitialBalance money.Money `json:"initialBalance"`
+}
+
+type ledgerEntryResponse struct {
+	SequenceNumber int64       `json:"sequenceNumber"`
+	TransactionID  string      `json:"transactionId"`
+	Direction      string      `json:"direction"`
+	Money          money.Money `json:"money"`
+	BalanceBefore  money.Money `json:"balanceBefore"`
+	BalanceAfter   money.Money `json:"balanceAfter"`
+	OccurredAt     time.Time   `json:"occurredAt"`
+}
+
+type ledgerResponse struct {
+	Entries    []ledgerEntryResponse `json:"entries"`
+	NextCursor *string               `json:"nextCursor"`
+}
+
+type reconciliationResponse struct {
+	WalletID          string      `json:"walletId"`
+	StoredBalance     money.Money `json:"storedBalance"`
+	CalculatedBalance money.Money `json:"calculatedBalance"`
+	Difference        money.Money `json:"difference"`
+	Consistent        bool        `json:"consistent"`
+	CheckedEntries    int64       `json:"checkedEntries"`
 }
 
 type walletResponse struct {
@@ -96,6 +123,115 @@ func getWalletHandler(useCase *walletapp.GetWalletUseCase, logger *slog.Logger) 
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(toWalletResponse(walletValue))
 	}
+}
+
+func ledgerHandler(useCase *walletapp.LedgerAuditUseCase, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		walletID := r.PathValue("walletId")
+		if _, err := uuid.Parse(walletID); err != nil {
+			writeOperationError(w, operation.ErrWalletNotFound, nil)
+			return
+		}
+		after, err := decodeLedgerCursor(r.URL.Query().Get("cursor"))
+		if err != nil {
+			writeOperationError(w, operation.ErrInvalidRequest, []errorDetailItem{{Field: "cursor", Reason: "must be a valid ledger cursor"}})
+			return
+		}
+		limit, err := ledgerLimit(r.URL.Query().Get("limit"))
+		if err != nil {
+			writeOperationError(w, operation.ErrInvalidRequest, []errorDetailItem{{Field: "limit", Reason: "must be an integer from 1 to 200"}})
+			return
+		}
+		page, err := useCase.List(r.Context(), walletID, after, limit)
+		if err != nil {
+			var opErr *operation.Error
+			if errors.As(err, &opErr) {
+				writeOperationError(w, opErr, nil)
+				return
+			}
+			logger.Error("list ledger failed", "walletId", walletID, "error", err)
+			writeOperationError(w, operation.ErrTemporarilyUnavailable, nil)
+			return
+		}
+		response := ledgerResponse{Entries: make([]ledgerEntryResponse, len(page.Entries))}
+		for i, entry := range page.Entries {
+			response.Entries[i] = ledgerEntryResponse{SequenceNumber: entry.SequenceNumber, TransactionID: entry.TransactionID, Direction: string(entry.Direction), Money: entry.Money, BalanceBefore: entry.BalanceBefore, BalanceAfter: entry.BalanceAfter, OccurredAt: entry.OccurredAt}
+		}
+		if page.Next != nil {
+			cursor := encodeLedgerCursor(*page.Next)
+			response.NextCursor = &cursor
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			logger.Error("encode ledger response failed", "walletId", walletID, "error", err)
+		}
+	}
+}
+
+func reconciliationHandler(useCase *walletapp.LedgerAuditUseCase, logger *slog.Logger, metrics *reconciliationMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		walletID := r.PathValue("walletId")
+		if _, err := uuid.Parse(walletID); err != nil {
+			writeOperationError(w, operation.ErrWalletNotFound, nil)
+			return
+		}
+		result, err := useCase.Reconcile(r.Context(), walletID)
+		if err != nil {
+			var opErr *operation.Error
+			if errors.As(err, &opErr) {
+				writeOperationError(w, opErr, nil)
+				return
+			}
+			logger.Error("reconcile wallet failed", "walletId", walletID, "error", err)
+			writeOperationError(w, operation.ErrTemporarilyUnavailable, nil)
+			return
+		}
+		consistent, err := result.StoredBalance.Compare(result.CalculatedBalance)
+		if err != nil {
+			logger.Error("compare reconciliation balances failed", "walletId", walletID, "error", err)
+			writeOperationError(w, operation.ErrTemporarilyUnavailable, nil)
+			return
+		}
+		response := reconciliationResponse{WalletID: result.WalletID, StoredBalance: result.StoredBalance, CalculatedBalance: result.CalculatedBalance, Difference: result.Difference, Consistent: consistent == 0, CheckedEntries: result.CheckedEntries}
+		if !response.Consistent {
+			logger.Warn("wallet reconciliation divergence", "walletId", walletID)
+			metrics.divergences.Inc()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			logger.Error("encode reconciliation response failed", "walletId", walletID, "error", err)
+		}
+	}
+}
+
+func ledgerLimit(raw string) (int, error) {
+	if raw == "" {
+		return 50, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 || limit > 200 {
+		return 0, errors.New("invalid ledger limit")
+	}
+	return limit, nil
+}
+
+func encodeLedgerCursor(sequence int64) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(sequence, 10)))
+}
+
+func decodeLedgerCursor(cursor string) (int64, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, err
+	}
+	sequence, err := strconv.ParseInt(string(decoded), 10, 64)
+	if err != nil || sequence < 1 {
+		return 0, errors.New("invalid ledger cursor")
+	}
+	return sequence, nil
 }
 
 // classifyDecodeError distinguishes a money-shaped decode failure (the

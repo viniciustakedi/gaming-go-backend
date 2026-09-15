@@ -14,62 +14,35 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
 // seam 3a - internal/httpapi's real HTTP contract for
 // POST /wagering/transactions (ticket 08), driven through appHarness against
 // the same Postgres, Keycloak and MiniStack every other test in this package
-// uses. Only BET, WIN without a reference, and LOSS are in scope here -
-// REFUND, ROLLBACK and a referenced WIN are tickets 10/11's job (see
-// process_operation.go's ErrOperationNotSupported).
+// uses. BET, WIN (with and without a reference), LOSS, REFUND and ROLLBACK
+// are all in scope here (ticket 10) - only a reference that has not arrived
+// yet, or is itself still PENDING_REFERENCE, is out of scope, left for
+// ticket 11's durable PENDING_REFERENCE persistence and retry worker (see
+// process_operation.go's ErrOperationNotSupported and
+// wagering_reversals_test.go).
 
-type wageringHTTPResponse struct {
-	TransactionID    string    `json:"transactionId"`
-	Status           string    `json:"status"`
-	FailureCode      string    `json:"failureCode"`
-	Balance          moneyJSON `json:"balance"`
-	IdempotentReplay bool      `json:"idempotentReplay"`
-}
+// wageringHTTPResponse, wageringBodyInput and wageringBody are
+// test/testclient's shared DTOs and body builder (spec, seam 3: "o mesmo
+// cliente de teste roda em dois harnesses") - test/multiinstance uses the
+// same types.
+type wageringHTTPResponse = testclient.WageringHTTPResponse
 
 func decodeWageringResponse(t *testing.T, body []byte) wageringHTTPResponse {
 	t.Helper()
-	var resp wageringHTTPResponse
-	requireNoError(t, json.Unmarshal(body, &resp), "decode wagering response: "+string(body))
-	return resp
+	return testclient.DecodeWageringResponse(t, body)
 }
 
-type wageringBodyInput struct {
-	providerID  string
-	externalID  string
-	playerID    string
-	walletID    string
-	roundID     string
-	gameID      string
-	kind        string
-	amount      string
-	currency    string
-	referenceID *string
-}
+type wageringBodyInput = testclient.WageringBodyInput
 
 func wageringBody(in wageringBodyInput) []byte {
-	payload := map[string]any{
-		"providerId":            in.providerID,
-		"externalTransactionId": in.externalID,
-		"playerId":              in.playerID,
-		"walletId":              in.walletID,
-		"roundId":               in.roundID,
-		"gameId":                in.gameID,
-		"kind":                  in.kind,
-		"money":                 map[string]string{"amount": in.amount, "currency": in.currency},
-	}
-	if in.referenceID != nil {
-		payload["referenceExternalTransactionId"] = *in.referenceID
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		panic(err)
-	}
-	return body
+	return testclient.WageringBody(in)
 }
 
 // openWalletHTTP creates a fresh wallet with the wallet-admin token
@@ -113,16 +86,7 @@ func wageringDuplicateAttemptsMetric(t *testing.T, h *appHarness, channel string
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /metrics status = %d, want 200", resp.StatusCode)
 	}
-	prefix := fmt.Sprintf(`wagering_duplicate_attempts_total{channel="%s"} `, channel)
-	for _, line := range strings.Split(string(body), "\n") {
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		value, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, prefix)), 64)
-		requireNoError(t, err, "parse wagering_duplicate_attempts_total value")
-		return value
-	}
-	return 0
+	return testclient.DuplicateAttemptsMetric(t, body, channel)
 }
 
 func wageringOperationsMetric(t *testing.T, h *appHarness, channel, kind, status string) float64 {
@@ -162,8 +126,8 @@ func TestWageringBet_Processed_DebitsWalletAndRecordsLedgerAndOutbox(t *testing.
 	correlationID := uniqueID("corr")
 
 	resp, body := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), correlationID)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -217,8 +181,8 @@ func TestWageringWin_Processed_CreditsWallet(t *testing.T) {
 	token := providerAToken(t)
 
 	resp, body := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "WIN", amount: "25.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "WIN", Amount: "25.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -246,8 +210,8 @@ func TestWageringLoss_Zero_NoLedgerNoVersionChange(t *testing.T) {
 	token := providerAToken(t)
 
 	resp, body := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "LOSS", amount: "0.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "LOSS", Amount: "0.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -282,8 +246,8 @@ func TestWageringBet_InsufficientFunds_RejectedAndAuditable(t *testing.T) {
 	token := providerAToken(t)
 
 	resp, body := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422, body = %s", resp.StatusCode, body)
@@ -321,8 +285,8 @@ func TestWageringCorrectableInputs_RejectWithoutPersisting(t *testing.T) {
 
 	base := func() wageringBodyInput {
 		return wageringBodyInput{
-			providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-			roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "10.00", currency: testCurrency,
+			ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+			RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "10.00", Currency: testCurrency,
 		}
 	}
 	ref := "some-ref"
@@ -335,13 +299,13 @@ func TestWageringCorrectableInputs_RejectWithoutPersisting(t *testing.T) {
 		wantCode   string
 	}{
 		{name: "missing idempotency key", in: base(), noKey: true, wantStatus: http.StatusUnprocessableEntity, wantCode: "MISSING_IDEMPOTENCY_KEY"},
-		{name: "invalid money format", in: func() wageringBodyInput { in := base(); in.amount = "10.5"; return in }(), wantStatus: http.StatusBadRequest, wantCode: "INVALID_MONEY"},
-		{name: "amount out of policy for BET", in: func() wageringBodyInput { in := base(); in.amount = "0.00"; return in }(), wantStatus: http.StatusUnprocessableEntity, wantCode: "INVALID_AMOUNT_FOR_KIND"},
-		{name: "OPENING not allowed", in: func() wageringBodyInput { in := base(); in.kind = "OPENING"; return in }(), wantStatus: http.StatusUnprocessableEntity, wantCode: "KIND_NOT_ALLOWED"},
-		{name: "reference forbidden on BET", in: func() wageringBodyInput { in := base(); in.referenceID = &ref; return in }(), wantStatus: http.StatusUnprocessableEntity, wantCode: "REFERENCE_NOT_ALLOWED"},
-		{name: "wallet not found", in: func() wageringBodyInput { in := base(); in.walletID = newUUID(t); return in }(), wantStatus: http.StatusNotFound, wantCode: "WALLET_NOT_FOUND"},
-		{name: "wallet player mismatch", in: func() wageringBodyInput { in := base(); in.playerID = newUUID(t); return in }(), wantStatus: http.StatusUnprocessableEntity, wantCode: "WALLET_PLAYER_MISMATCH"},
-		{name: "wallet currency mismatch", in: func() wageringBodyInput { in := base(); in.currency = "USD"; return in }(), wantStatus: http.StatusUnprocessableEntity, wantCode: "WALLET_CURRENCY_MISMATCH"},
+		{name: "invalid money format", in: func() wageringBodyInput { in := base(); in.Amount = "10.5"; return in }(), wantStatus: http.StatusBadRequest, wantCode: "INVALID_MONEY"},
+		{name: "amount out of policy for BET", in: func() wageringBodyInput { in := base(); in.Amount = "0.00"; return in }(), wantStatus: http.StatusUnprocessableEntity, wantCode: "INVALID_AMOUNT_FOR_KIND"},
+		{name: "OPENING not allowed", in: func() wageringBodyInput { in := base(); in.Kind = "OPENING"; return in }(), wantStatus: http.StatusUnprocessableEntity, wantCode: "KIND_NOT_ALLOWED"},
+		{name: "reference forbidden on BET", in: func() wageringBodyInput { in := base(); in.ReferenceID = &ref; return in }(), wantStatus: http.StatusUnprocessableEntity, wantCode: "REFERENCE_NOT_ALLOWED"},
+		{name: "wallet not found", in: func() wageringBodyInput { in := base(); in.WalletID = newUUID(t); return in }(), wantStatus: http.StatusNotFound, wantCode: "WALLET_NOT_FOUND"},
+		{name: "wallet player mismatch", in: func() wageringBodyInput { in := base(); in.PlayerID = newUUID(t); return in }(), wantStatus: http.StatusUnprocessableEntity, wantCode: "WALLET_PLAYER_MISMATCH"},
+		{name: "wallet currency mismatch", in: func() wageringBodyInput { in := base(); in.Currency = "USD"; return in }(), wantStatus: http.StatusUnprocessableEntity, wantCode: "WALLET_CURRENCY_MISMATCH"},
 	}
 
 	var before int
@@ -380,8 +344,8 @@ func TestWageringReplay_ReturnsOriginalBalanceAfterFurtherMovement(t *testing.T)
 	token := providerAToken(t)
 	key := "idem-" + uniqueID("k")
 	in := wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}
 
 	first, firstBody := doWagering(t, h, token, in, key, "")
@@ -393,8 +357,8 @@ func TestWageringReplay_ReturnsOriginalBalanceAfterFurtherMovement(t *testing.T)
 	// Move the wallet further so a naive replay would read a different
 	// current balance than what was originally persisted.
 	secondIn := wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "10.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "10.00", Currency: testCurrency,
 	}
 	second, secondBody := doWagering(t, h, token, secondIn, "idem-"+uniqueID("k"), "")
 	if second.StatusCode != http.StatusOK {
@@ -429,16 +393,16 @@ func TestWageringConflict_SameKeyDifferentContent_IdempotencyKeyReused(t *testin
 	key := "idem-" + uniqueID("k")
 
 	first, firstBody := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, key, "")
 	if first.StatusCode != http.StatusOK {
 		t.Fatalf("first status = %d, want 200, body = %s", first.StatusCode, firstBody)
 	}
 
 	second, secondBody := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "31.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "31.00", Currency: testCurrency,
 	}, key, "")
 	if second.StatusCode != http.StatusConflict {
 		t.Fatalf("second status = %d, want 409, body = %s", second.StatusCode, secondBody)
@@ -456,16 +420,16 @@ func TestWageringConflict_DifferentKeySameExternalID_ExternalTransactionIDConfli
 	externalID := uniqueID("ext")
 
 	first, firstBody := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: externalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: externalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if first.StatusCode != http.StatusOK {
 		t.Fatalf("first status = %d, want 200, body = %s", first.StatusCode, firstBody)
 	}
 
 	second, secondBody := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: externalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: externalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if second.StatusCode != http.StatusConflict {
 		t.Fatalf("second status = %d, want 409, body = %s", second.StatusCode, secondBody)
@@ -483,8 +447,8 @@ func TestWageringProviderMismatch_ForbiddenWithNoEffect(t *testing.T) {
 	tokenB := providerBToken(t)
 
 	resp, body := doWagering(t, h, tokenB, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403, body = %s", resp.StatusCode, body)
@@ -504,8 +468,8 @@ func TestWageringIdempotencyKeys_ScopedByProvider(t *testing.T) {
 	sharedKey := "idem-" + uniqueID("shared")
 
 	respA, bodyA := doWagering(t, h, tokenA, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: walletA.PlayerID, walletID: walletA.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "10.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: walletA.PlayerID, WalletID: walletA.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "10.00", Currency: testCurrency,
 	}, sharedKey, "")
 	if respA.StatusCode != http.StatusOK {
 		t.Fatalf("provider-a status = %d, want 200, body = %s", respA.StatusCode, bodyA)
@@ -513,8 +477,8 @@ func TestWageringIdempotencyKeys_ScopedByProvider(t *testing.T) {
 	resultA := decodeWageringResponse(t, bodyA)
 
 	respB, bodyB := doWagering(t, h, tokenB, wageringBodyInput{
-		providerID: "provider-b", externalID: uniqueID("ext"), playerID: walletB.PlayerID, walletID: walletB.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "20.00", currency: testCurrency,
+		ProviderID: "provider-b", ExternalID: uniqueID("ext"), PlayerID: walletB.PlayerID, WalletID: walletB.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "20.00", Currency: testCurrency,
 	}, sharedKey, "")
 	if respB.StatusCode != http.StatusOK {
 		t.Fatalf("provider-b status = %d, want 200 (same key, different provider, must not collide), body = %s", respB.StatusCode, bodyB)
@@ -535,8 +499,8 @@ func TestWagering50ParallelIdenticalBets_OneDebitFortyNineReplays(t *testing.T) 
 	token := providerAToken(t)
 	key := "idem-" + uniqueID("k")
 	in := wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}
 
 	const attempts = 50
@@ -611,8 +575,8 @@ func TestWageringTwoConcurrentBetsExceedingBalance_OneProcessedOneRejected(t *te
 	token := providerAToken(t)
 
 	inputs := [2]wageringBodyInput{
-		{providerID: "provider-a", externalID: uniqueID("ext-1"), playerID: wallet.PlayerID, walletID: wallet.ID, roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "80.00", currency: testCurrency},
-		{providerID: "provider-a", externalID: uniqueID("ext-2"), playerID: wallet.PlayerID, walletID: wallet.ID, roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "80.00", currency: testCurrency},
+		{ProviderID: "provider-a", ExternalID: uniqueID("ext-1"), PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "80.00", Currency: testCurrency},
+		{ProviderID: "provider-a", ExternalID: uniqueID("ext-2"), PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "80.00", Currency: testCurrency},
 	}
 	// Captured up front so the resend below can replay the exact same two
 	// original requests - same key, same body - rather than fresh ones.
@@ -713,8 +677,8 @@ func TestWageringDistinctWallets_ProcessInParallelWithoutSerialization(t *testin
 			defer wg.Done()
 			<-start
 			resp, _ := doWagering(t, h, token, wageringBodyInput{
-				providerID: "provider-a", externalID: uniqueID("ext"), playerID: walletResponses[i].PlayerID, walletID: walletResponses[i].ID,
-				roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "10.00", currency: testCurrency,
+				ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: walletResponses[i].PlayerID, WalletID: walletResponses[i].ID,
+				RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "10.00", Currency: testCurrency,
 			}, "idem-"+uniqueID("k"), "")
 			results[i] = resp.StatusCode
 		}(i)
@@ -766,8 +730,8 @@ func TestWageringTransientFailure_ServiceUnavailableWithRetryAfterAndNoEffect(t 
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	resp, body := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "10.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "10.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503, body = %s", resp.StatusCode, body)

@@ -232,13 +232,16 @@ func Load() (Config, error) {
 	cfg.SQS.Consumer.ProcessingTimeout = getDuration("SQS_CONSUMER_PROCESSING_TIMEOUT", 20*time.Second, &errs)
 	cfg.SQS.Consumer.RetryBase = getDuration("SQS_CONSUMER_RETRY_BASE", time.Second, &errs)
 	cfg.SQS.Consumer.RetryMax = getDuration("SQS_CONSUMER_RETRY_MAX", time.Minute, &errs)
-	cfg.SQS.Consumer.ShutdownTimeout = getDuration("SQS_CONSUMER_SHUTDOWN_TIMEOUT", 15*time.Second, &errs)
+	cfg.SQS.Consumer.ShutdownTimeout = getDuration("SQS_CONSUMER_SHUTDOWN_TIMEOUT", 30*time.Second, &errs)
 	cfg.SQS.Consumer.ProviderAllowlist = getCSV("SQS_CONSUMER_PROVIDER_ALLOWLIST", "provider-a,provider-b", &errs)
 	if cfg.SQS.Consumer.VisibilityTimeout <= cfg.SQS.Consumer.ProcessingTimeout {
 		errs = append(errs, fmt.Errorf("SQS_CONSUMER_VISIBILITY_TIMEOUT: must be greater than SQS_CONSUMER_PROCESSING_TIMEOUT"))
 	}
 	if cfg.SQS.Consumer.RetryMax < cfg.SQS.Consumer.RetryBase {
 		errs = append(errs, fmt.Errorf("SQS_CONSUMER_RETRY_MAX: must be greater than or equal to SQS_CONSUMER_RETRY_BASE"))
+	}
+	if cfg.SQS.Consumer.ShutdownTimeout <= cfg.SQS.Consumer.PollWait+SQSConsumerPostCancelDrain {
+		errs = append(errs, fmt.Errorf("SQS_CONSUMER_SHUTDOWN_TIMEOUT: must exceed SQS_CONSUMER_POLL_WAIT plus post-cancel drain (%s), got %s", cfg.SQS.Consumer.PollWait+SQSConsumerPostCancelDrain, cfg.SQS.Consumer.ShutdownTimeout))
 	}
 
 	cfg.Outbox.PollInterval = getDuration("OUTBOX_POLL_INTERVAL", 250*time.Millisecond, &errs)
@@ -269,7 +272,7 @@ func Load() (Config, error) {
 	// here is generous rather than matched to SQS_STARTUP_TIMEOUT's 10s.
 	cfg.Auth.DiscoveryTimeout = getDuration("AUTH_DISCOVERY_TIMEOUT", 45*time.Second, &errs)
 
-	cfg.Fx.StopTimeout = getDuration("FX_STOP_TIMEOUT", 45*time.Second, &errs)
+	cfg.Fx.StopTimeout = getDuration("FX_STOP_TIMEOUT", 60*time.Second, &errs)
 
 	// internalStopDeadline sums every stop-side deadline the shutdown
 	// sequence already waits on before the pools close. fx.StopTimeout must exceed that sum, or the Fx-wide deadline can

@@ -3,9 +3,7 @@
 package integration
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +16,7 @@ import (
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/app"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/httpapi"
+	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
 // appHarness is the reusable seam 3a fixture the spec asks ticket 06 to
@@ -56,7 +55,7 @@ func newAppHarness(t *testing.T) *appHarness {
 	fxApp.RequireStart()
 	h := &appHarness{
 		baseURL:    "http://" + server.Addr(),
-		client:     &http.Client{Timeout: 10 * time.Second},
+		client:     testclient.NewHTTPClient(10 * time.Second),
 		pool:       pool,
 		adminToken: fetchToken(t, walletServiceClient()),
 		fxApp:      fxApp,
@@ -83,10 +82,10 @@ func (h *appHarness) stop(t *testing.T, ctx context.Context) error {
 	return h.fxApp.Stop(ctx)
 }
 
-// do issues one HTTP request against the running app and returns the
-// response with its body already read, so callers never have to remember
-// the drain-and-close dance themselves. body may be nil for a bodyless
-// request.
+// do issues one HTTP request against the running app, bound to t's own
+// context, and returns the response with its body already read, so callers
+// never have to remember the drain-and-close dance themselves. body may be
+// nil for a bodyless request.
 //
 // Every request carries h.adminToken as "Authorization: Bearer <token>" by
 // default, since every /wallets* route now requires wallet-admin (ticket
@@ -98,28 +97,11 @@ func (h *appHarness) stop(t *testing.T, ctx context.Context) error {
 func (h *appHarness) do(t *testing.T, method, path string, headers map[string]string, body []byte) (*http.Response, []byte) {
 	t.Helper()
 
-	var reader io.Reader
-	if body != nil {
-		reader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequest(method, h.baseURL+path, reader)
-	requireNoError(t, err, "build request "+method+" "+path)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+h.adminToken)
+	merged := map[string]string{"Authorization": "Bearer " + h.adminToken}
 	for k, v := range headers {
-		if k == "Authorization" && v == "" {
-			req.Header.Del("Authorization")
-			continue
-		}
-		req.Header.Set(k, v)
+		merged[k] = v
 	}
-
-	resp, err := h.client.Do(req)
-	requireNoError(t, err, method+" "+path)
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	requireNoError(t, err, "read response body for "+method+" "+path)
-	return resp, respBody
+	return testclient.Do(t.Context(), t, h.client, method, h.baseURL+path, merged, body)
 }
 
 // setAppEnv gives config.Load() everything it needs to build the same
@@ -134,6 +116,7 @@ func setAppEnv(t *testing.T) {
 		t.Setenv(k, v)
 	}
 	setEnvIfUnset(t, "SQS_ENDPOINT_URL", "http://localhost:4566")
+	setEnvIfUnset(t, "SQS_CONSUMER_ENABLED", "false")
 	setEnvIfUnset(t, "AUTH_ISSUER_URL", keycloakIssuerURL())
 	setEnvIfUnset(t, "AUTH_AUDIENCE", authAudience())
 	t.Setenv("HTTP_ADDR", "127.0.0.1:0")

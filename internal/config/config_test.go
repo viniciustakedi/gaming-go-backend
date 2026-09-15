@@ -192,6 +192,18 @@ func TestLoad_RejectsInsufficientStopTimeout(t *testing.T) {
 	}
 }
 
+func TestLoad_RejectsConsumerShutdownBeforePollAndDrain(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+	t.Setenv("SQS_CONSUMER_POLL_WAIT", "10s")
+	t.Setenv("SQS_CONSUMER_SHUTDOWN_TIMEOUT", "15s")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("want error when consumer shutdown cannot cover its poll and drain")
+	}
+}
+
 func TestLoad_RequiresPostCancellationDrainBudget(t *testing.T) {
 	for k, v := range validEnv(t) {
 		t.Setenv(k, v)

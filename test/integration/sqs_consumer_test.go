@@ -34,6 +34,7 @@ import (
 // The ledger and inbox reads are assertions only; the observed contract is a
 // single SQS message causing a single wallet debit, even on redelivery.
 func TestSQSConsumer_BetAndRedelivery_DebitsOnce(t *testing.T) {
+	t.Setenv("SQS_CONSUMER_ENABLED", "true")
 	t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")
 	h := newAppHarness(t)
 	ctx := context.Background()
@@ -44,8 +45,8 @@ func TestSQSConsumer_BetAndRedelivery_DebitsOnce(t *testing.T) {
 	messageID := uniqueID("sqs-message")
 	key := "idem-" + uniqueID("key")
 	bodyInput := wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}
 	body := sqsWagerEnvelope(t, messageID, bodyInput, key)
 	gateway := loadTestCreds(t)
@@ -59,8 +60,8 @@ func TestSQSConsumer_BetAndRedelivery_DebitsOnce(t *testing.T) {
 	// replay, distinct from an inbox redelivery of the exact same messageId.
 	replayMessageID := uniqueID("sqs-replay")
 	sendWagerMessage(t, client, wallet.ID, "delivery-2-"+uniqueID("dedup"), sqsWagerEnvelope(t, replayMessageID, wageringBodyInput{
-		providerID: "provider-a", externalID: bodyInput.externalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: bodyInput.roundID, gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: bodyInput.ExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: bodyInput.RoundID, GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, key))
 	waitForWageringDuplicateAttemptsMetric(t, h, "SQS", duplicatesBefore+1)
 
@@ -85,7 +86,7 @@ func TestSQSConsumer_BetAndRedelivery_DebitsOnce(t *testing.T) {
 	// transport boundary too: HTTP commits first, and SQS later records only
 	// its inbox completion while returning the already persisted operation.
 	httpWallet := openWalletHTTP(t, h, "100.00")
-	httpInput := wageringBodyInput{providerID: "provider-a", externalID: uniqueID("ext"), playerID: httpWallet.PlayerID, walletID: httpWallet.ID, roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency}
+	httpInput := wageringBodyInput{ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: httpWallet.PlayerID, WalletID: httpWallet.ID, RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency}
 	httpKey := "idem-" + uniqueID("key")
 	response, responseBody := doWagering(t, h, providerAToken(t), httpInput, httpKey, "")
 	if response.StatusCode != http.StatusOK {
@@ -108,6 +109,7 @@ func TestSQSConsumer_BetAndRedelivery_DebitsOnce(t *testing.T) {
 // DLQ. A unique marker in the body prevents stale DLQ residue from making an
 // assertion pass; each found message is deleted before the test returns.
 func TestSQSConsumer_InvalidOpening_GoesToDLQWithoutBlockingAnotherWallet(t *testing.T) {
+	t.Setenv("SQS_CONSUMER_ENABLED", "true")
 	t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")
 	h := newAppHarness(t)
 	ctx := context.Background()
@@ -117,12 +119,12 @@ func TestSQSConsumer_InvalidOpening_GoesToDLQWithoutBlockingAnotherWallet(t *tes
 	marker := uniqueID("invalid-opening")
 	invalidExternalID := uniqueID("invalid-external")
 	invalid := sqsWagerEnvelope(t, marker, wageringBodyInput{
-		providerID: "provider-a", externalID: invalidExternalID, playerID: invalidWallet.PlayerID, walletID: invalidWallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "OPENING", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: invalidExternalID, PlayerID: invalidWallet.PlayerID, WalletID: invalidWallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "OPENING", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("key"))
 	valid := sqsWagerEnvelope(t, uniqueID("valid-message"), wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("valid-external"), playerID: validWallet.PlayerID, walletID: validWallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("valid-external"), PlayerID: validWallet.PlayerID, WalletID: validWallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("key"))
 
 	rc := loadTestCreds(t)
@@ -202,19 +204,20 @@ func sqsDLQMetric(t *testing.T, h *appHarness, reason string) float64 {
 }
 
 func TestSQSConsumer_HashMismatchForMessageID_GoesToDLQ(t *testing.T) {
+	t.Setenv("SQS_CONSUMER_ENABLED", "true")
 	t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")
 	h := newAppHarness(t)
 	ctx := context.Background()
 	wallet := openWalletHTTP(t, h, "100.00")
 	marker := uniqueID("hash-mismatch")
 	first := wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("first-external"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("first-external"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}
 	secondExternalID := uniqueID("second-external")
 	second := first
-	second.externalID = secondExternalID
-	second.amount = "31.00"
+	second.ExternalID = secondExternalID
+	second.Amount = "31.00"
 
 	rc := loadTestCreds(t)
 	gateway := sqsClient(t, rc.gatewayKey, rc.gatewaySecret)
@@ -266,8 +269,8 @@ func TestSQSConsumer_UnavailableDatabase_RedrivesFixtureMessage(t *testing.T) {
 
 	marker := uniqueID("database-unavailable")
 	message := sqsWagerEnvelope(t, marker, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("external"), playerID: newUUID(t), walletID: newUUID(t),
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("external"), PlayerID: newUUID(t), WalletID: newUUID(t),
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("key"))
 	redriveTester := sqsClient(t, rc.redriveKey, rc.redriveSecret)
 	if _, err := redriveTester.SendMessage(context.Background(), &sqs.SendMessageInput{
@@ -284,6 +287,7 @@ func TestSQSConsumer_UnavailableDatabase_RedrivesFixtureMessage(t *testing.T) {
 }
 
 func TestSQSConsumer_StopWithinDeadline_CommitsAndDeletesInFlightMessage(t *testing.T) {
+	t.Setenv("SQS_CONSUMER_ENABLED", "true")
 	t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")
 	h := newAppHarness(t)
 	ctx := context.Background()
@@ -291,8 +295,8 @@ func TestSQSConsumer_StopWithinDeadline_CommitsAndDeletesInFlightMessage(t *test
 	lock := lockWallet(t, wallet.ID)
 	messageID := uniqueID("stop-completes")
 	input := wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("external"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("external"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}
 	rc := loadTestCreds(t)
 	sendWagerMessage(t, sqsClient(t, rc.gatewayKey, rc.gatewaySecret), wallet.ID, "stop-completes-"+messageID, sqsWagerEnvelope(t, messageID, input, "idem-"+uniqueID("key")))
@@ -319,6 +323,7 @@ func TestSQSConsumer_StopWithinDeadline_CommitsAndDeletesInFlightMessage(t *test
 }
 
 func TestSQSConsumer_StopDeadlineExpires_ReleasesAndReprocessesExactlyOnce(t *testing.T) {
+	t.Setenv("SQS_CONSUMER_ENABLED", "true")
 	t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")
 	t.Setenv("SQS_CONSUMER_VISIBILITY_TIMEOUT", "5s")
 	t.Setenv("SQS_CONSUMER_PROCESSING_TIMEOUT", "2s")
@@ -328,8 +333,8 @@ func TestSQSConsumer_StopDeadlineExpires_ReleasesAndReprocessesExactlyOnce(t *te
 	lock := lockWallet(t, wallet.ID)
 	messageID := uniqueID("stop-expires")
 	input := wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("external"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("external"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}
 	rc := loadTestCreds(t)
 	sendWagerMessage(t, sqsClient(t, rc.gatewayKey, rc.gatewaySecret), wallet.ID, "stop-expires-"+messageID, sqsWagerEnvelope(t, messageID, input, "idem-"+uniqueID("key")))
@@ -351,9 +356,40 @@ func TestSQSConsumer_StopDeadlineExpires_ReleasesAndReprocessesExactlyOnce(t *te
 	}
 }
 
+func TestSQSConsumer_StopWaitsForLongPollAndLeavesLaterMessageVisible(t *testing.T) {
+	t.Setenv("SQS_CONSUMER_ENABLED", "true")
+	t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")
+	h := newAppHarness(t)
+
+	time.Sleep(250 * time.Millisecond)
+	started := time.Now()
+	if err := h.stop(t, context.Background()); err != nil {
+		t.Fatalf("Fx stop during long poll: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 1500*time.Millisecond {
+		t.Fatalf("Fx stop during 1s long poll took %s, want less than 1.5s", elapsed)
+	}
+
+	rc := loadTestCreds(t)
+	marker := uniqueID("after-stop")
+	message, err := json.Marshal(map[string]string{"probe": marker})
+	requireNoError(t, err, "marshal post-stop probe")
+	gateway := sqsClient(t, rc.gatewayKey, rc.gatewaySecret)
+	sendWagerMessage(t, gateway, "after-stop-"+marker, marker, message)
+	reader := sqsClient(t, rc.consumerKey, rc.consumerSecret)
+	queue := queueURL(inputQueueName())
+	handle, err := receiveByMarker(context.Background(), reader, queue, marker, time.Now().Add(2*time.Second))
+	requireNoError(t, err, "receive post-stop probe")
+	if handle == nil {
+		t.Fatalf("post-stop probe %s remained hidden after the consumer stopped", marker)
+	}
+	_, err = reader.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{QueueUrl: aws.String(queue), ReceiptHandle: handle})
+	requireNoError(t, err, "delete post-stop probe")
+}
+
 func sqsWagerEnvelope(t *testing.T, messageID string, in wageringBodyInput, key string) []byte {
 	t.Helper()
-	payload := map[string]any{"messageId": messageID, "type": "WagerTransactionRequested", "occurredAt": "2026-09-15T00:00:00Z", "data": map[string]any{"providerId": in.providerID, "externalTransactionId": in.externalID, "idempotencyKey": key, "playerId": in.playerID, "walletId": in.walletID, "roundId": in.roundID, "gameId": in.gameID, "kind": in.kind, "money": map[string]string{"amount": in.amount, "currency": in.currency}}}
+	payload := map[string]any{"messageId": messageID, "type": "WagerTransactionRequested", "occurredAt": "2026-09-15T00:00:00Z", "data": map[string]any{"providerId": in.ProviderID, "externalTransactionId": in.ExternalID, "idempotencyKey": key, "playerId": in.PlayerID, "walletId": in.WalletID, "roundId": in.RoundID, "gameId": in.GameID, "kind": in.Kind, "money": map[string]string{"amount": in.Amount, "currency": in.Currency}}}
 	encoded, err := json.Marshal(payload)
 	requireNoError(t, err, "marshal SQS wager envelope")
 	return encoded
