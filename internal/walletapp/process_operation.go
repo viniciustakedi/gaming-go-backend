@@ -19,15 +19,15 @@ const (
 	ChannelSQS  = "SQS"
 )
 
-// ErrOperationNotSupported is returned for a kind whose movement depends on
-// resolving a reference against an existing transaction: REFUND, ROLLBACK,
-// or a WIN that names one. Resolving an existing reference is ticket 10's
-// job, and persisting one that has not arrived yet as PENDING_REFERENCE is
-// ticket 11's (it needs attempt/lease columns this ticket's repositories do
-// not populate) - so this use case only ever reaches operation.Process for
-// BET, WIN without a reference, and LOSS, and treats anything else as not
-// yet implemented rather than guess at a behaviour no ticket has built.
-var ErrOperationNotSupported = errors.New("walletapp: operation kind requires reference resolution not implemented by this ticket")
+// ErrOperationNotSupported is returned for a REFUND, ROLLBACK or referenced
+// WIN whose reference has not arrived yet, or has arrived but is itself
+// still PENDING_REFERENCE - the two cases operation.Evaluate reports as
+// WaitForReference. Persisting that wait as a durable PENDING_REFERENCE row
+// is ticket 11's job: it needs the attempt/lease columns this ticket's
+// repositories do not populate, and a worker to retry them. Every reference
+// that has actually arrived and reached a terminal status is resolved and
+// evaluated by this ticket instead of reaching this error.
+var ErrOperationNotSupported = errors.New("walletapp: operation's reference is not yet resolvable, PENDING_REFERENCE not implemented by this ticket")
 
 // ErrRetryInNewTransaction signals that the wager-transaction INSERT found
 // nothing to insert (spec, decision 3, step 5's ON CONFLICT DO NOTHING
@@ -145,11 +145,13 @@ func NewProcessOperationUseCase(uow UnitOfWork, metrics OperationMetrics) *Proce
 // provider can simply retry with a corrected body must never open and roll
 // back a database transaction to say so.
 //
-// Evaluate is called with no resolved reference: every kind this ticket
-// supports (BET, WIN without a reference, LOSS) reaches its final Decision
-// without ever needing one, and every kind that would need one (REFUND,
-// ROLLBACK, a WIN that names a reference) is rejected as
-// ErrOperationNotSupported below instead of silently doing the wrong thing.
+// Evaluate is called with no resolved reference, which is final for BET,
+// WIN without a reference and LOSS - none of them ever need one. For
+// REFUND, ROLLBACK or a WIN that names a reference, Evaluate always answers
+// WaitForReference here (it is deliberately given no reference to resolve
+// against); ExecuteInTx's resolveDecision reruns Evaluate with the
+// reference actually resolved from the database, under the wallet lock,
+// once ExecuteInTx has one to offer (decision 3, step 4).
 func (uc *ProcessOperationUseCase) Prepare(input ProcessOperationInput) (PreparedOperation, error) {
 	if !isValidIdempotencyKey(input.IdempotencyKey) {
 		return PreparedOperation{}, operation.ErrMissingIdempotencyKey
@@ -163,9 +165,6 @@ func (uc *ProcessOperationUseCase) Prepare(input ProcessOperationInput) (Prepare
 	decision, err := operation.Evaluate(input.Request, nil, false)
 	if err != nil {
 		return PreparedOperation{}, err
-	}
-	if decision.Action != operation.Process {
-		return PreparedOperation{}, ErrOperationNotSupported
 	}
 
 	return PreparedOperation{input: input, hash: hash, decision: decision, ready: true}, nil
@@ -303,7 +302,59 @@ func (uc *ProcessOperationUseCase) attempt(ctx context.Context, repos Repositori
 		return result, false, err
 	}
 
-	return uc.processNew(ctx, repos, walletValue, input, hash, decision, now)
+	resolvedDecision, reference, err := uc.resolveDecision(ctx, repos, req, decision)
+	if err != nil {
+		return ProcessOperationResult{}, false, err
+	}
+	if resolvedDecision.Action == operation.WaitForReference {
+		return ProcessOperationResult{}, false, ErrOperationNotSupported
+	}
+
+	return uc.processNew(ctx, repos, walletValue, input, hash, resolvedDecision, reference, now)
+}
+
+// resolveDecision finalizes prepared's preliminary decision for a genuinely
+// new attempt. BET, WIN without a reference and LOSS already carry their
+// final Decision from Prepare - Action is Process and there is nothing to
+// resolve. REFUND, ROLLBACK and a WIN naming a reference always come back
+// from Prepare as WaitForReference, since Prepare's own Evaluate call was
+// deliberately given no reference; this looks the reference up by
+// (providerId, referenceExternalTransactionId), scoped to the same
+// provider (spec: "a referência é resolvida por (providerId,
+// referenceExternalTransactionId)"), and - once it is PROCESSED - whether
+// it already carries a successful reversal, then reruns Evaluate for the
+// definitive answer (spec, decision 3, step 4: "resolve a referência ... e
+// aplica as regras de domínio"). The reference is visible here, not raced,
+// because every write that could produce or change it also has to hold
+// this same wallet's FOR UPDATE lock first - REFUND, ROLLBACK and a
+// referenced WIN all require reference.WalletID() == req.WalletID, so they
+// can never disagree about which wallet's lock protects them.
+func (uc *ProcessOperationUseCase) resolveDecision(ctx context.Context, repos Repositories, req operation.Request, decision operation.Decision) (operation.Decision, *domainwallet.WagerTransaction, error) {
+	if decision.Action != operation.WaitForReference {
+		return decision, nil, nil
+	}
+
+	reference, err := repos.Transactions.FindReference(ctx, req.ProviderID, *req.ReferenceExternalTransactionID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return decision, nil, nil
+		}
+		return operation.Decision{}, nil, fmt.Errorf("walletapp: find reference: %w", err)
+	}
+
+	var alreadyReversed bool
+	if reference.Status() == domainwallet.Processed {
+		alreadyReversed, err = repos.Transactions.ExistsSuccessfulReversal(ctx, reference.ID())
+		if err != nil {
+			return operation.Decision{}, nil, fmt.Errorf("walletapp: check reference reversed: %w", err)
+		}
+	}
+
+	resolved, err := operation.Evaluate(req, reference, alreadyReversed)
+	if err != nil {
+		return operation.Decision{}, nil, err
+	}
+	return resolved, reference, nil
 }
 
 // lookupExisting classifies the attempt against whatever the same provider
@@ -373,8 +424,12 @@ func replayResult(record *ExistingTransaction) (ProcessOperationResult, error) {
 
 // processNew builds and persists a genuinely new attempt: the transaction
 // row, its movement (if any), the ledger entry and wallet update it produces,
-// and the outbox events for the conclusion.
-func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Repositories, walletValue *domainwallet.Wallet, input ProcessOperationInput, hash string, decision operation.Decision, now time.Time) (ProcessOperationResult, bool, error) {
+// and the outbox events for the conclusion. reference is the reference
+// resolveDecision resolved, nil for BET, LOSS and a WIN with none - its id,
+// when present, is what gets persisted as the transaction's own resolved
+// referenceTransactionID (spec: "a referência resolvida fica persistida"),
+// whether decision ultimately processes or rejects the operation.
+func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Repositories, walletValue *domainwallet.Wallet, input ProcessOperationInput, hash string, decision operation.Decision, reference *domainwallet.WagerTransaction, now time.Time) (ProcessOperationResult, bool, error) {
 	req := input.Request
 
 	transactionID, err := newID()
@@ -386,12 +441,16 @@ func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Reposit
 	if req.ReferenceExternalTransactionID != nil {
 		referenceExternalID = *req.ReferenceExternalTransactionID
 	}
+	referenceTransactionID := ""
+	if reference != nil {
+		referenceTransactionID = reference.ID()
+	}
 
 	transaction, err := domainwallet.NewExternalTransaction(domainwallet.ExternalTransactionInput{
 		ID: transactionID, ExternalTransactionID: req.ExternalTransactionID, ProviderID: req.ProviderID,
 		IdempotencyKey: input.IdempotencyKey, PayloadHash: hash, WalletID: req.WalletID, PlayerID: req.PlayerID,
 		RoundID: req.RoundID, GameID: req.GameID, Kind: req.Kind, Money: req.Money,
-		ReferenceExternalTransactionID: referenceExternalID, CreatedAt: now,
+		ReferenceExternalTransactionID: referenceExternalID, ReferenceTransactionID: referenceTransactionID, CreatedAt: now,
 	})
 	if err != nil {
 		return ProcessOperationResult{}, false, fmt.Errorf("walletapp: build wager transaction: %w", err)
@@ -401,10 +460,18 @@ func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Reposit
 		entry         *domainwallet.WalletLedgerEntry
 		rejectionCode *operation.Error
 	)
+	switch {
+	// A reference that resolved to a durable rejection (REFERENCE_NOT_
+	// PROCESSED, REFERENCE_ALREADY_REVERSED, REFERENCE_MISMATCH,
+	// REFERENCE_AMOUNT_MISMATCH, REFERENCE_KIND_NOT_REVERSIBLE) never
+	// attempts a movement: decision.Error already carries the exact code
+	// operation.Evaluate classified it under.
+	case decision.Action == operation.Reject:
+		rejectionCode = decision.Error
 	// LOSS carries an empty Direction and never calls Debit or Credit, so
 	// its version never changes (spec: "LOSS não chama débito nem crédito,
 	// então a versão não muda").
-	if decision.Direction != "" {
+	case decision.Direction != "":
 		ledgerEntryID, err := newID()
 		if err != nil {
 			return ProcessOperationResult{}, false, err
@@ -419,10 +486,12 @@ func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Reposit
 			if !errors.Is(err, domainwallet.ErrInsufficientFunds) {
 				return ProcessOperationResult{}, false, fmt.Errorf("walletapp: apply movement: %w", err)
 			}
-			// A BET without enough balance is a durable, auditable rejection,
-			// not a transient failure: it is still persisted below, with
-			// wallet and version left untouched (spec: "aposta sem saldo é
-			// rejeitada como REJECTED com INSUFFICIENT_FUNDS").
+			// A BET without enough balance, or a reversal that would leave
+			// the balance negative, is a durable, auditable rejection, not a
+			// transient failure: it is still persisted below, with wallet
+			// and version left untouched (spec: "aposta sem saldo é
+			// rejeitada como REJECTED com INSUFFICIENT_FUNDS"; "reversão com
+			// débito acima do saldo devolve REVERSAL_INSUFFICIENT_FUNDS").
 			rejectionCode = operation.InsufficientFundsFor(req.Kind)
 		}
 	}

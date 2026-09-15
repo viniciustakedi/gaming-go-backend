@@ -42,6 +42,33 @@ func testRequest(t *testing.T, kind domainwallet.WagerKind, amount string) opera
 	}
 }
 
+// testReferenceTransaction rehydrates a resolved reference transaction - the
+// shape FindReference hands resolveDecision - with its own id, kind,
+// status, wallet/player/round and amount, and testProvider/testGame filled
+// in as the fixed values every test in this file shares (they never need to
+// vary to exercise a specific mismatch, so only the columns
+// operation.Evaluate actually reads are ever overridden by callers).
+func testReferenceTransaction(t *testing.T, id string, kind domainwallet.WagerKind, status domainwallet.TransactionStatus, walletID, playerID, roundID, amount string) *domainwallet.WagerTransaction {
+	t.Helper()
+	input := domainwallet.RehydratedTransaction{
+		ID: id, ExternalTransactionID: "ref-ext-" + id, ProviderID: testProvider,
+		IdempotencyKey: "ref-idem-" + id, PayloadHash: "ref-hash-" + id, WalletID: walletID, PlayerID: playerID,
+		RoundID: roundID, GameID: testGame, Kind: kind, Origin: domainwallet.External,
+		Money: mustMoney(t, amount, money.BRL), Status: status, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	if status == domainwallet.Rejected || status == domainwallet.Failed {
+		input.FailureCode = string(operation.CodeInsufficientFunds)
+	}
+	if kind == domainwallet.Refund || kind == domainwallet.Rollback {
+		input.ReferenceExternalTransactionID = "ref-of-" + id
+	}
+	transaction, err := domainwallet.RehydrateTransaction(input)
+	if err != nil {
+		t.Fatalf("RehydrateTransaction: %v", err)
+	}
+	return transaction
+}
+
 type processHarness struct {
 	wallets      *fakeWalletRepository
 	transactions *fakeTransactionRepository
@@ -260,7 +287,13 @@ func TestProcessOperationUseCase_ReferenceForbiddenOnBet_Correctable(t *testing.
 	}
 }
 
-func TestProcessOperationUseCase_WinWithReference_NotSupportedByThisTicket(t *testing.T) {
+// TestProcessOperationUseCase_WinWithReference_MissingReference_NotSupportedByThisTicket
+// covers this ticket's own documented boundary: a reference that has not
+// arrived at all still answers ErrOperationNotSupported, but only once
+// ExecuteInTx has actually looked for it inside the wallet-locked
+// transaction - unlike ticket 08's blanket rejection, Prepare alone can no
+// longer tell a genuinely resolvable reference apart from a missing one.
+func TestProcessOperationUseCase_WinWithReference_MissingReference_NotSupportedByThisTicket(t *testing.T) {
 	t.Parallel()
 	h := newProcessHarness(testWallet(t, "100.00", 1))
 	ref := "bet-ref"
@@ -271,8 +304,294 @@ func TestProcessOperationUseCase_WinWithReference_NotSupportedByThisTicket(t *te
 	if !errors.Is(err, walletapp.ErrOperationNotSupported) {
 		t.Errorf("err = %v, want ErrOperationNotSupported", err)
 	}
-	if h.uow.calls != 0 {
-		t.Errorf("UnitOfWork.WithinTx calls = %d, want 0 - Prepare must reject this before any transaction opens", h.uow.calls)
+	if h.uow.calls != 1 {
+		t.Errorf("UnitOfWork.WithinTx calls = %d, want 1 - resolving the reference needs the wallet-locked transaction", h.uow.calls)
+	}
+	if len(h.transactions.inserted) != 0 {
+		t.Errorf("transactions inserted = %d, want 0 - an unresolved reference must persist nothing", len(h.transactions.inserted))
+	}
+}
+
+// TestProcessOperationUseCase_Refund_ReferencePendingReference_NotSupportedByThisTicket
+// covers the other WaitForReference case: the reference exists but has not
+// itself reached a terminal status yet (spec: "referência existe, mas está
+// PENDING_REFERENCE: a operação continua esperando").
+func TestProcessOperationUseCase_Refund_ReferencePendingReference_NotSupportedByThisTicket(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "100.00", 1))
+	h.transactions.reference = testReferenceTransaction(t, "bet-tx", domainwallet.Bet, domainwallet.PendingReference, testWalletID, testPlayerID, testRound, "30.00")
+	req := testRequest(t, domainwallet.Refund, "30.00")
+	ref := "bet-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	_, err := h.process(t, req, testIdempKey)
+	if !errors.Is(err, walletapp.ErrOperationNotSupported) {
+		t.Errorf("err = %v, want ErrOperationNotSupported", err)
+	}
+	if len(h.transactions.inserted) != 0 {
+		t.Errorf("transactions inserted = %d, want 0 - a still-pending reference must persist nothing", len(h.transactions.inserted))
+	}
+}
+
+func TestProcessOperationUseCase_RefundOfBet_CreditsAndPersistsResolvedReference(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "70.00", 2))
+	reference := testReferenceTransaction(t, "bet-tx-1", domainwallet.Bet, domainwallet.Processed, testWalletID, testPlayerID, testRound, "30.00")
+	h.transactions.reference = reference
+	req := testRequest(t, domainwallet.Refund, "30.00")
+	ref := "bet-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result.Status != domainwallet.Processed {
+		t.Errorf("result = %+v, want PROCESSED", result)
+	}
+	balance, _ := result.Balance.MinorUnits()
+	if balance != 10000 {
+		t.Errorf("Balance = %d, want 10000 (70.00 + 30.00)", balance)
+	}
+	if len(h.ledger.inserted) != 1 || h.ledger.inserted[0].Direction() != domainwallet.Credit {
+		t.Fatalf("ledger inserted = %+v, want one CREDIT entry", h.ledger.inserted)
+	}
+	if len(h.transactions.inserted) != 1 || h.transactions.inserted[0].ReferenceTransactionID() != reference.ID() {
+		t.Fatalf("inserted transaction = %+v, want referenceTransactionId %q", h.transactions.inserted, reference.ID())
+	}
+}
+
+func TestProcessOperationUseCase_RollbackOfBet_CreditsWallet(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "70.00", 2))
+	h.transactions.reference = testReferenceTransaction(t, "bet-tx-1", domainwallet.Bet, domainwallet.Processed, testWalletID, testPlayerID, testRound, "30.00")
+	req := testRequest(t, domainwallet.Rollback, "30.00")
+	ref := "bet-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if len(h.ledger.inserted) != 1 || h.ledger.inserted[0].Direction() != domainwallet.Credit {
+		t.Fatalf("ledger inserted = %+v, want one CREDIT entry (ROLLBACK of a BET credits)", h.ledger.inserted)
+	}
+	balance, _ := result.Balance.MinorUnits()
+	if balance != 10000 {
+		t.Errorf("Balance = %d, want 10000", balance)
+	}
+}
+
+func TestProcessOperationUseCase_RollbackOfWin_DebitsWallet(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "100.00", 2))
+	h.transactions.reference = testReferenceTransaction(t, "win-tx-1", domainwallet.Win, domainwallet.Processed, testWalletID, testPlayerID, testRound, "25.00")
+	req := testRequest(t, domainwallet.Rollback, "25.00")
+	ref := "win-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if len(h.ledger.inserted) != 1 || h.ledger.inserted[0].Direction() != domainwallet.Debit {
+		t.Fatalf("ledger inserted = %+v, want one DEBIT entry (ROLLBACK of a WIN debits)", h.ledger.inserted)
+	}
+	balance, _ := result.Balance.MinorUnits()
+	if balance != 7500 {
+		t.Errorf("Balance = %d, want 7500", balance)
+	}
+}
+
+func TestProcessOperationUseCase_RollbackOfRefund_DebitsAndBlocksNewRefund(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "100.00", 3))
+	h.transactions.reference = testReferenceTransaction(t, "refund-tx-1", domainwallet.Refund, domainwallet.Processed, testWalletID, testPlayerID, testRound, "30.00")
+	req := testRequest(t, domainwallet.Rollback, "30.00")
+	ref := "refund-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if len(h.ledger.inserted) != 1 || h.ledger.inserted[0].Direction() != domainwallet.Debit {
+		t.Fatalf("ledger inserted = %+v, want one DEBIT entry (ROLLBACK of a REFUND debits, undoing it)", h.ledger.inserted)
+	}
+	balance, _ := result.Balance.MinorUnits()
+	if balance != 7000 {
+		t.Errorf("Balance = %d, want 7000", balance)
+	}
+}
+
+func TestProcessOperationUseCase_WinWithReference_ValidatesBetSameRound_Credits(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "70.00", 2))
+	h.transactions.reference = testReferenceTransaction(t, "bet-tx-1", domainwallet.Bet, domainwallet.Processed, testWalletID, testPlayerID, testRound, "30.00")
+	req := testRequest(t, domainwallet.Win, "50.00")
+	ref := "bet-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	balance, _ := result.Balance.MinorUnits()
+	if balance != 12000 {
+		t.Errorf("Balance = %d, want 12000", balance)
+	}
+	if len(h.transactions.inserted) != 1 || h.transactions.inserted[0].ReferenceTransactionID() != "bet-tx-1" {
+		t.Fatalf("inserted transaction = %+v, want referenceTransactionId bet-tx-1", h.transactions.inserted)
+	}
+}
+
+func TestProcessOperationUseCase_SecondReversalOfSameBet_ReferenceAlreadyReversed(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "70.00", 3))
+	h.transactions.reference = testReferenceTransaction(t, "bet-tx-1", domainwallet.Bet, domainwallet.Processed, testWalletID, testPlayerID, testRound, "30.00")
+	h.transactions.alreadyReversed = true
+	req := testRequest(t, domainwallet.Rollback, "30.00")
+	ref := "bet-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result.Status != domainwallet.Rejected || result.FailureCode != string(operation.CodeReferenceAlreadyReversed) {
+		t.Errorf("result = %+v, want REJECTED/REFERENCE_ALREADY_REVERSED", result)
+	}
+	if len(h.ledger.inserted) != 0 {
+		t.Errorf("ledger inserted = %d, want 0", len(h.ledger.inserted))
+	}
+	if len(h.outbox.inserted) != 1 || h.outbox.inserted[0].eventType != domainwallet.WagerTransactionRejectedEventType {
+		t.Errorf("outbox inserted = %+v, want exactly one WagerTransactionRejected", h.outbox.inserted)
+	}
+}
+
+func TestProcessOperationUseCase_RollbackOfRollback_ReferenceKindNotReversible(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "70.00", 2))
+	h.transactions.reference = testReferenceTransaction(t, "rollback-tx-1", domainwallet.Rollback, domainwallet.Processed, testWalletID, testPlayerID, testRound, "30.00")
+	req := testRequest(t, domainwallet.Rollback, "30.00")
+	ref := "rollback-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result.Status != domainwallet.Rejected || result.FailureCode != string(operation.CodeReferenceKindNotReversible) {
+		t.Errorf("result = %+v, want REJECTED/REFERENCE_KIND_NOT_REVERSIBLE", result)
+	}
+}
+
+func TestProcessOperationUseCase_RollbackOfLoss_ReferenceKindNotReversible(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "70.00", 2))
+	h.transactions.reference = testReferenceTransaction(t, "loss-tx-1", domainwallet.Loss, domainwallet.Processed, testWalletID, testPlayerID, testRound, "0.00")
+	req := testRequest(t, domainwallet.Rollback, "30.00")
+	ref := "loss-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result.Status != domainwallet.Rejected || result.FailureCode != string(operation.CodeReferenceKindNotReversible) {
+		t.Errorf("result = %+v, want REJECTED/REFERENCE_KIND_NOT_REVERSIBLE", result)
+	}
+}
+
+func TestProcessOperationUseCase_RollbackExceedsBalance_ReversalInsufficientFunds(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "10.00", 2))
+	h.transactions.reference = testReferenceTransaction(t, "win-tx-1", domainwallet.Win, domainwallet.Processed, testWalletID, testPlayerID, testRound, "25.00")
+	req := testRequest(t, domainwallet.Rollback, "25.00")
+	ref := "win-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result.Status != domainwallet.Rejected || result.FailureCode != string(operation.CodeReversalInsufficientFunds) {
+		t.Errorf("result = %+v, want REJECTED/REVERSAL_INSUFFICIENT_FUNDS (distinct from INSUFFICIENT_FUNDS)", result)
+	}
+	balance, _ := result.Balance.MinorUnits()
+	if balance != 1000 {
+		t.Errorf("Balance = %d, want unchanged 1000", balance)
+	}
+	if len(h.wallets.updated) != 0 {
+		t.Errorf("wallets updated = %d, want 0 - a rejected reversal must not move the wallet", len(h.wallets.updated))
+	}
+}
+
+func TestProcessOperationUseCase_ReferenceMismatch_DifferentRound(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "70.00", 2))
+	h.transactions.reference = testReferenceTransaction(t, "bet-tx-1", domainwallet.Bet, domainwallet.Processed, testWalletID, testPlayerID, "different-round", "30.00")
+	req := testRequest(t, domainwallet.Refund, "30.00")
+	ref := "bet-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result.Status != domainwallet.Rejected || result.FailureCode != string(operation.CodeReferenceMismatch) {
+		t.Errorf("result = %+v, want REJECTED/REFERENCE_MISMATCH", result)
+	}
+}
+
+func TestProcessOperationUseCase_ReferenceAmountMismatch(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "70.00", 2))
+	h.transactions.reference = testReferenceTransaction(t, "bet-tx-1", domainwallet.Bet, domainwallet.Processed, testWalletID, testPlayerID, testRound, "30.00")
+	req := testRequest(t, domainwallet.Refund, "20.00")
+	ref := "bet-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result.Status != domainwallet.Rejected || result.FailureCode != string(operation.CodeReferenceAmountMismatch) {
+		t.Errorf("result = %+v, want REJECTED/REFERENCE_AMOUNT_MISMATCH", result)
+	}
+}
+
+func TestProcessOperationUseCase_ReferenceRejected_ReferenceNotProcessed(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "70.00", 2))
+	h.transactions.reference = testReferenceTransaction(t, "bet-tx-1", domainwallet.Bet, domainwallet.Rejected, testWalletID, testPlayerID, testRound, "30.00")
+	req := testRequest(t, domainwallet.Refund, "30.00")
+	ref := "bet-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result.Status != domainwallet.Rejected || result.FailureCode != string(operation.CodeReferenceNotProcessed) {
+		t.Errorf("result = %+v, want REJECTED/REFERENCE_NOT_PROCESSED", result)
+	}
+}
+
+func TestProcessOperationUseCase_ReferenceFailed_ReferenceNotProcessed(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "70.00", 2))
+	h.transactions.reference = testReferenceTransaction(t, "bet-tx-1", domainwallet.Bet, domainwallet.Failed, testWalletID, testPlayerID, testRound, "30.00")
+	req := testRequest(t, domainwallet.Refund, "30.00")
+	ref := "bet-ref"
+	req.ReferenceExternalTransactionID = &ref
+
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result.Status != domainwallet.Rejected || result.FailureCode != string(operation.CodeReferenceNotProcessed) {
+		t.Errorf("result = %+v, want REJECTED/REFERENCE_NOT_PROCESSED", result)
 	}
 }
 
@@ -494,18 +813,28 @@ func TestProcessOperationUseCase_Prepare_ReferenceForbiddenOnBet(t *testing.T) {
 	}
 }
 
-func TestProcessOperationUseCase_Prepare_WinWithReference_NotSupportedByThisTicket(t *testing.T) {
+// TestProcessOperationUseCase_Prepare_WinWithReference_ReturnsWaitForReferenceDecision
+// documents that Prepare alone can never tell a resolvable reference apart
+// from a missing one - it has no database access - so a WIN naming a
+// reference always comes back as a preliminary WaitForReference decision,
+// not an error; ExecuteInTx's resolveDecision is what turns this into a
+// final Process, Reject or ErrOperationNotSupported once it can actually
+// look the reference up.
+func TestProcessOperationUseCase_Prepare_WinWithReference_ReturnsWaitForReferenceDecision(t *testing.T) {
 	t.Parallel()
 	useCase := newPrepareOnlyUseCase(t)
 	ref := "bet-ref"
 	req := testRequest(t, domainwallet.Win, "10.00")
 	req.ReferenceExternalTransactionID = &ref
 
-	_, err := useCase.Prepare(walletapp.ProcessOperationInput{
+	prepared, err := useCase.Prepare(walletapp.ProcessOperationInput{
 		Request: req, IdempotencyKey: testIdempKey, CorrelationID: "corr-1", Channel: walletapp.ChannelHTTP,
 	})
-	if !errors.Is(err, walletapp.ErrOperationNotSupported) {
-		t.Errorf("err = %v, want ErrOperationNotSupported", err)
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if prepared.Decision().Action != operation.WaitForReference {
+		t.Errorf("Decision().Action = %v, want operation.WaitForReference", prepared.Decision().Action)
 	}
 }
 
