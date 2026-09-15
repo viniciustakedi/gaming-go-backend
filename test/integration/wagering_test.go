@@ -18,9 +18,12 @@ import (
 // seam 3a - internal/httpapi's real HTTP contract for
 // POST /wagering/transactions (ticket 08), driven through appHarness against
 // the same Postgres, Keycloak and MiniStack every other test in this package
-// uses. Only BET, WIN without a reference, and LOSS are in scope here -
-// REFUND, ROLLBACK and a referenced WIN are tickets 10/11's job (see
-// process_operation.go's ErrOperationNotSupported).
+// uses. BET, WIN (with and without a reference), LOSS, REFUND and ROLLBACK
+// are all in scope here (ticket 10) - only a reference that has not arrived
+// yet, or is itself still PENDING_REFERENCE, is out of scope, left for
+// ticket 11's durable PENDING_REFERENCE persistence and retry worker (see
+// process_operation.go's ErrOperationNotSupported and
+// wagering_reversals_test.go).
 
 // wageringHTTPResponse, wageringBodyInput and wageringBody are
 // test/testclient's shared DTOs and body builder (spec, seam 3: "o mesmo

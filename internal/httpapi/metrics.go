@@ -17,6 +17,17 @@ type httpLatency struct {
 	duration *prometheus.HistogramVec
 }
 
+type reconciliationMetrics struct{ divergences prometheus.Counter }
+
+func newReconciliationMetrics(registry *prometheus.Registry) *reconciliationMetrics {
+	m := &reconciliationMetrics{divergences: prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "wallet_reconciliation_divergences_total",
+		Help: "Total wallet reconciliations whose stored balance differs from the ledger.",
+	})}
+	registry.MustRegister(m.divergences)
+	return m
+}
+
 func newHTTPLatency(registry *prometheus.Registry) *httpLatency {
 	m := &httpLatency{
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{

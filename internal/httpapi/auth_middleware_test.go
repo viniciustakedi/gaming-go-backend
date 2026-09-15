@@ -224,6 +224,135 @@ func TestRequireRole_Success_CallsNext(t *testing.T) {
 	}
 }
 
+// TestRequireAnyRole_EitherRole_CallsNext proves the two read routes ticket
+// 09 adds accept both provider and wallet-admin (spec, decision 7): the
+// route alone admits either role, and it is the use case, not this
+// middleware, that decides what each caller is allowed to see.
+func TestRequireAnyRole_EitherRole_CallsNext(t *testing.T) {
+	roles := []string{auth.RoleProvider, auth.RoleWalletAdmin}
+	cases := []auth.Identity{
+		{Subject: "provider-sub", Roles: []string{auth.RoleProvider}, ProviderID: "provider-a"},
+		{Subject: "admin-sub", Roles: []string{auth.RoleWalletAdmin}},
+	}
+	for _, identity := range cases {
+		var nextRan bool
+		handler := requireAnyRole(roles, func(w http.ResponseWriter, r *http.Request) {
+			nextRan = true
+			w.WriteHeader(http.StatusOK)
+		})
+
+		req := requestWithIdentity(identity)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+
+		if rec.Code != http.StatusOK || !nextRan {
+			t.Errorf("identity = %+v: status = %d, nextRan = %v, want 200 and next to run", identity, rec.Code, nextRan)
+		}
+	}
+}
+
+func TestRequireAnyRole_NeitherRole_Returns403(t *testing.T) {
+	handler := requireAnyRole([]string{auth.RoleProvider, auth.RoleWalletAdmin}, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next must not run when the caller has none of the accepted roles")
+	})
+
+	req := requestWithIdentity(auth.Identity{Subject: "sub", Roles: []string{"some-other-role"}})
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	assertErrorCode(t, rec.Body.Bytes(), codeForbidden)
+}
+
+// TestRequireAnyRole_BothRoles_ProviderIDIrrelevant proves the precedence
+// fix (review finding: a token with both provider and wallet-admin, and no
+// provider_id, was rejected as forbidden before role selection even ran,
+// while the same token with a provider_id became an admin). wallet-admin
+// now wins outright whenever the route accepts it, so provider_id is never
+// asked of a caller who already clears the route as admin.
+func TestRequireAnyRole_BothRoles_ProviderIDIrrelevant(t *testing.T) {
+	roles := []string{auth.RoleProvider, auth.RoleWalletAdmin}
+	cases := []struct {
+		name     string
+		identity auth.Identity
+	}{
+		{"without provider_id", auth.Identity{Subject: "sub", Roles: []string{auth.RoleProvider, auth.RoleWalletAdmin}}},
+		{"with provider_id", auth.Identity{Subject: "sub", Roles: []string{auth.RoleProvider, auth.RoleWalletAdmin}, ProviderID: "provider-a"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var nextRan bool
+			handler := requireAnyRole(roles, func(w http.ResponseWriter, r *http.Request) {
+				nextRan = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			req := requestWithIdentity(tc.identity)
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+
+			if rec.Code != http.StatusOK || !nextRan {
+				t.Fatalf("status = %d, nextRan = %v, want 200 and next to run for a caller with both roles", rec.Code, nextRan)
+			}
+		})
+	}
+}
+
+// TestRequireAnyRole_ProviderOnly_RequiresProviderID proves the other half
+// of the same precedence rule: a caller with only the provider role - no
+// wallet-admin to fall back on - still needs provider_id to act as a
+// provider.
+func TestRequireAnyRole_ProviderOnly_RequiresProviderID(t *testing.T) {
+	roles := []string{auth.RoleProvider, auth.RoleWalletAdmin}
+
+	t.Run("without provider_id is forbidden", func(t *testing.T) {
+		handler := requireAnyRole(roles, func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("next must not run for a provider identity missing provider_id")
+		})
+
+		req := requestWithIdentity(auth.Identity{Subject: "sub", Roles: []string{auth.RoleProvider}})
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+		assertErrorCode(t, rec.Body.Bytes(), codeForbidden)
+	})
+
+	t.Run("with provider_id calls next", func(t *testing.T) {
+		var nextRan bool
+		handler := requireAnyRole(roles, func(w http.ResponseWriter, r *http.Request) {
+			nextRan = true
+			w.WriteHeader(http.StatusOK)
+		})
+
+		req := requestWithIdentity(auth.Identity{Subject: "sub", Roles: []string{auth.RoleProvider}, ProviderID: "provider-a"})
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+
+		if rec.Code != http.StatusOK || !nextRan {
+			t.Fatalf("status = %d, nextRan = %v, want 200 and next to run", rec.Code, nextRan)
+		}
+	})
+}
+
+func TestRequireAnyRole_NoIdentityInContext_Returns401(t *testing.T) {
+	handler := requireAnyRole([]string{auth.RoleProvider, auth.RoleWalletAdmin}, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next must not run without an authenticated identity in context")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/wagering/transactions/x", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
 func assertErrorCode(t *testing.T, body []byte, want string) {
 	t.Helper()
 	var decoded errorBody

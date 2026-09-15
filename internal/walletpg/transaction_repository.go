@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -154,6 +155,186 @@ func (r *transactionRepository) findExisting(ctx context.Context, sql, providerI
 		record.FailureCode = *failureCode
 	}
 	return record, nil
+}
+
+// FindReference resolves a REFUND, ROLLBACK or referenced WIN's reference
+// by (providerId, referenceExternalTransactionId) (spec, "Regras das
+// operações e referências"). It rehydrates the full domain transaction -
+// not just the handful of fields operation.Evaluate reads - so a corrupted
+// row fails validate() here rather than being silently trusted.
+func (r *transactionRepository) FindReference(ctx context.Context, providerID, referenceExternalTransactionID string) (*domainwallet.WagerTransaction, error) {
+	row := r.q.QueryRow(ctx, `
+		SELECT id, external_transaction_id, provider_id, idempotency_key, payload_hash,
+			wallet_id, player_id, round_id, game_id, kind, origin, amount, currency,
+			reference_external_transaction_id, reference_transaction_id, status, failure_code,
+			created_at, updated_at
+		FROM wager_transactions
+		WHERE provider_id = $1 AND external_transaction_id = $2`, providerID, referenceExternalTransactionID)
+
+	var (
+		id, externalTransactionID, txProviderID, idempotencyKey, payloadHash string
+		walletID, playerID, roundID, gameID, kind, origin, currency          string
+		amount                                                               int64
+		referenceExternalID, referenceTransactionID, failureCode             *string
+		status                                                               string
+		createdAt, updatedAt                                                 time.Time
+	)
+	if err := row.Scan(
+		&id, &externalTransactionID, &txProviderID, &idempotencyKey, &payloadHash,
+		&walletID, &playerID, &roundID, &gameID, &kind, &origin, &amount, &currency,
+		&referenceExternalID, &referenceTransactionID, &status, &failureCode, &createdAt, &updatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, walletapp.ErrNotFound
+		}
+		return nil, fmt.Errorf("walletpg: find reference transaction: %w", err)
+	}
+
+	amountMoney, err := money.New(amount, money.Currency(currency))
+	if err != nil {
+		return nil, fmt.Errorf("walletpg: decode reference amount: %w", err)
+	}
+
+	input := domainwallet.RehydratedTransaction{
+		ID: id, ExternalTransactionID: externalTransactionID, ProviderID: txProviderID,
+		IdempotencyKey: idempotencyKey, PayloadHash: payloadHash, WalletID: walletID, PlayerID: playerID,
+		RoundID: roundID, GameID: gameID, Kind: domainwallet.WagerKind(kind), Origin: domainwallet.TransactionOrigin(origin),
+		Money: amountMoney, Status: domainwallet.TransactionStatus(status), CreatedAt: createdAt, UpdatedAt: updatedAt,
+	}
+	if referenceExternalID != nil {
+		input.ReferenceExternalTransactionID = *referenceExternalID
+	}
+	if referenceTransactionID != nil {
+		input.ReferenceTransactionID = *referenceTransactionID
+	}
+	if failureCode != nil {
+		input.FailureCode = *failureCode
+	}
+
+	transaction, err := domainwallet.RehydrateTransaction(input)
+	if err != nil {
+		return nil, fmt.Errorf("walletpg: rehydrate reference transaction: %w", err)
+	}
+	return transaction, nil
+}
+
+// ExistsSuccessfulReversal backs the partial unique index's application-side
+// counterpart (spec, migration 0004: "wager_transactions_reversal_per_reference_idx").
+// It is only ever queried while this call still holds the referenced
+// transaction's wallet FOR UPDATE lock, so a concurrent REFUND and ROLLBACK
+// of the same BET can never both observe false: the second one always runs
+// after the first's commit has become visible.
+func (r *transactionRepository) ExistsSuccessfulReversal(ctx context.Context, referenceTransactionID string) (bool, error) {
+	var exists bool
+	if err := r.q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM wager_transactions
+			WHERE reference_transaction_id = $1 AND kind IN ('REFUND', 'ROLLBACK') AND status = 'PROCESSED'
+		)`, referenceTransactionID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("walletpg: check successful reversal: %w", err)
+	}
+	return exists, nil
+}
+
+// transactionDetailColumns backs both FindDetailByID and
+// FindDetailByProviderExternalID: the full row the spec's "Contratos HTTP"
+// registro completo needs, including the attempts/next_attempt_at/
+// pending_expires_at columns no domain rehydration path reads yet (they
+// exist for ticket 11's worker) - this ticket reads them as plain columns
+// instead of going through domainwallet.RehydrateTransaction, which does
+// not expose them.
+const transactionDetailColumns = `
+	id, external_transaction_id, provider_id, player_id, wallet_id, round_id, game_id,
+	kind, origin, amount, currency, reference_external_transaction_id, reference_transaction_id,
+	status, failure_code, resulting_balance, attempts, next_attempt_at, pending_expires_at,
+	created_at, updated_at`
+
+func (r *transactionRepository) FindDetailByID(ctx context.Context, id string) (*walletapp.TransactionDetail, error) {
+	row := r.q.QueryRow(ctx, "SELECT "+transactionDetailColumns+" FROM wager_transactions WHERE id = $1", id)
+	detail, err := scanTransactionDetail(row)
+	if err != nil {
+		return nil, fmt.Errorf("walletpg: find wager transaction detail by id: %w", err)
+	}
+	return detail, nil
+}
+
+func (r *transactionRepository) FindDetailByProviderExternalID(ctx context.Context, providerID, externalTransactionID string) (*walletapp.TransactionDetail, error) {
+	row := r.q.QueryRow(ctx, "SELECT "+transactionDetailColumns+" FROM wager_transactions WHERE provider_id = $1 AND external_transaction_id = $2", providerID, externalTransactionID)
+	detail, err := scanTransactionDetail(row)
+	if err != nil {
+		return nil, fmt.Errorf("walletpg: find wager transaction detail by external id: %w", err)
+	}
+	return detail, nil
+}
+
+// scanTransactionDetail unmarshals one transactionDetailColumns row.
+// ErrNotFound is returned bare, not wrapped, so both callers above can
+// still wrap it with their own context while errors.Is(_, walletapp.ErrNotFound)
+// keeps working for the use case.
+func scanTransactionDetail(row pgx.Row) (*walletapp.TransactionDetail, error) {
+	var (
+		id, playerID, walletID, kind, origin, currency, status   string
+		externalTransactionID, providerID, roundID, gameID       *string
+		referenceExternalID, referenceTransactionID, failureCode *string
+		amount                                                   int64
+		resultingBalance                                         *int64
+		attempts                                                 int
+		nextAttemptAt, pendingExpiresAt                          *time.Time
+		createdAt, updatedAt                                     time.Time
+	)
+	if err := row.Scan(
+		&id, &externalTransactionID, &providerID, &playerID, &walletID, &roundID, &gameID,
+		&kind, &origin, &amount, &currency, &referenceExternalID, &referenceTransactionID,
+		&status, &failureCode, &resultingBalance, &attempts, &nextAttemptAt, &pendingExpiresAt,
+		&createdAt, &updatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, walletapp.ErrNotFound
+		}
+		return nil, err
+	}
+
+	amountMoney, err := money.New(amount, money.Currency(currency))
+	if err != nil {
+		return nil, fmt.Errorf("decode transaction amount: %w", err)
+	}
+
+	detail := &walletapp.TransactionDetail{
+		TransactionID: id, PlayerID: playerID, WalletID: walletID,
+		Kind: domainwallet.WagerKind(kind), Origin: domainwallet.TransactionOrigin(origin), Money: amountMoney,
+		Status: domainwallet.TransactionStatus(status), Attempts: attempts, CreatedAt: createdAt, UpdatedAt: updatedAt,
+	}
+	if externalTransactionID != nil {
+		detail.ExternalTransactionID = *externalTransactionID
+	}
+	if providerID != nil {
+		detail.ProviderID = *providerID
+	}
+	if roundID != nil {
+		detail.RoundID = *roundID
+	}
+	if gameID != nil {
+		detail.GameID = *gameID
+	}
+	if referenceExternalID != nil {
+		detail.ReferenceExternalTransactionID = *referenceExternalID
+	}
+	if referenceTransactionID != nil {
+		detail.ReferenceTransactionID = *referenceTransactionID
+	}
+	if failureCode != nil {
+		detail.FailureCode = *failureCode
+	}
+	if resultingBalance != nil {
+		balanceMoney, err := money.New(*resultingBalance, money.Currency(currency))
+		if err != nil {
+			return nil, fmt.Errorf("decode transaction resulting balance: %w", err)
+		}
+		detail.ResultingBalance = &balanceMoney
+	}
+	detail.NextAttemptAt = nextAttemptAt
+	detail.PendingExpiresAt = pendingExpiresAt
+	return detail, nil
 }
 
 func strPtr(s string) *string { return &s }

@@ -103,6 +103,14 @@ type fakeTransactionRepository struct {
 	byIdempotencyKeyErr     error
 	byExternal              *walletapp.ExistingTransaction
 	byExternalErr           error
+	reference               *domainwallet.WagerTransaction
+	referenceErr            error
+	alreadyReversed         bool
+	alreadyReversedErr      error
+	detailByID              *walletapp.TransactionDetail
+	detailByIDErr           error
+	detailByExternal        *walletapp.TransactionDetail
+	detailByExternalErr     error
 }
 
 func (f *fakeTransactionRepository) Insert(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error {
@@ -163,6 +171,43 @@ func (f *fakeTransactionRepository) FindByExternalTransactionID(ctx context.Cont
 		return nil, walletapp.ErrNotFound
 	}
 	return f.byExternal, nil
+}
+
+func (f *fakeTransactionRepository) FindReference(ctx context.Context, providerID, referenceExternalTransactionID string) (*domainwallet.WagerTransaction, error) {
+	if f.referenceErr != nil {
+		return nil, f.referenceErr
+	}
+	if f.reference == nil {
+		return nil, walletapp.ErrNotFound
+	}
+	return f.reference, nil
+}
+
+func (f *fakeTransactionRepository) ExistsSuccessfulReversal(ctx context.Context, referenceTransactionID string) (bool, error) {
+	if f.alreadyReversedErr != nil {
+		return false, f.alreadyReversedErr
+	}
+	return f.alreadyReversed, nil
+}
+
+func (f *fakeTransactionRepository) FindDetailByID(ctx context.Context, id string) (*walletapp.TransactionDetail, error) {
+	if f.detailByIDErr != nil {
+		return nil, f.detailByIDErr
+	}
+	if f.detailByID == nil {
+		return nil, walletapp.ErrNotFound
+	}
+	return f.detailByID, nil
+}
+
+func (f *fakeTransactionRepository) FindDetailByProviderExternalID(ctx context.Context, providerID, externalTransactionID string) (*walletapp.TransactionDetail, error) {
+	if f.detailByExternalErr != nil {
+		return nil, f.detailByExternalErr
+	}
+	if f.detailByExternal == nil {
+		return nil, walletapp.ErrNotFound
+	}
+	return f.detailByExternal, nil
 }
 
 type fakeLedgerRepository struct {

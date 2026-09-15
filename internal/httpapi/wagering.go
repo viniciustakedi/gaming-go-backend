@@ -83,11 +83,16 @@ func wageringTransactionsHandler(useCase *walletapp.ProcessOperationUseCase, log
 				return
 			}
 			if errors.Is(err, walletapp.ErrOperationNotSupported) {
-				// Not part of the spec's documented catalog: REFUND, ROLLBACK
-				// and a referenced WIN need reference resolution that ticket
-				// 10 adds and PENDING_REFERENCE persistence that ticket 11
-				// adds. Labelled plainly rather than guessed at, since no
-				// scenario in this ticket's scope ever reaches it.
+				// Not part of the spec's documented catalog: a REFUND,
+				// ROLLBACK or referenced WIN whose reference has not
+				// arrived yet, or has arrived but is itself still
+				// PENDING_REFERENCE, needs the durable PENDING_REFERENCE
+				// persistence and retry worker ticket 11 adds. Every
+				// reference that has actually arrived and reached a
+				// terminal status is resolved and evaluated by ticket 10
+				// instead of reaching this branch. Labelled plainly rather
+				// than guessed at, since no scenario in this ticket's scope
+				// exercises it beyond that one documented gap.
 				writeErrorEnvelope(w, http.StatusNotImplemented, errorBody{Error: errorDetail{
 					Code:        "REFERENCE_RESOLUTION_NOT_IMPLEMENTED",
 					Message:     "this operation kind requires reference resolution not implemented by this ticket",
@@ -147,7 +152,7 @@ func statusForWageringError(err *operation.Error) int {
 	switch err.Code() {
 	case operation.CodeInvalidRequest, operation.CodeInvalidMoney:
 		return http.StatusBadRequest
-	case operation.CodeWalletNotFound:
+	case operation.CodeWalletNotFound, operation.CodeTransactionNotFound:
 		return http.StatusNotFound
 	}
 	switch err.Classification() {
