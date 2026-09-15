@@ -13,20 +13,29 @@ import (
 	"errors"
 	"time"
 
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/money"
 	domainwallet "github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/wallet"
 )
 
-// ErrNotFound is returned by WalletRepository.FindByID when no row matches.
-// It is a repository-level sentinel, not an HTTP-facing failure code: the
-// use case is what translates it to operation.ErrWalletNotFound, keeping
-// this package's repositories ignorant of the HTTP error catalog.
-var ErrNotFound = errors.New("walletapp: wallet not found")
+// ErrNotFound is returned by WalletRepository.FindByID/FindForUpdate and by
+// WagerTransactionRepository's two lookups when no row matches. It is a
+// repository-level sentinel, not an HTTP-facing failure code: the use case
+// is what translates it to the right operation.Error, keeping this
+// package's repositories ignorant of the HTTP error catalog.
+var ErrNotFound = errors.New("walletapp: not found")
 
 // ErrAlreadyExists is returned by WalletRepository.Insert when the
 // (playerId, currency) pair already has a wallet - detected by the
 // database's own unique constraint, which is also what makes concurrent
 // opens for the same pair safe: only one INSERT can win.
 var ErrAlreadyExists = errors.New("walletapp: wallet already exists")
+
+// ErrConcurrencyConflict is returned by WalletRepository.UpdateBalance when
+// the row's version no longer matches the one the caller read under its own
+// FOR UPDATE lock. This is defense in depth (spec: "as garantias no banco
+// independem do lock") - it is never expected to fire in practice, since the
+// lock is held for the whole processing attempt.
+var ErrConcurrencyConflict = errors.New("walletapp: wallet version changed concurrently")
 
 // Repositories bundles every repository port a unit of work hands to the
 // function passed to UnitOfWork.WithinTx, all bound to that same
@@ -52,15 +61,56 @@ type UnitOfWork interface {
 type WalletRepository interface {
 	Insert(ctx context.Context, w *domainwallet.Wallet) error
 	FindByID(ctx context.Context, id string) (*domainwallet.Wallet, error)
+	// FindForUpdate reads the wallet row locked with SELECT ... FOR UPDATE,
+	// so the caller has exclusive use of it for the rest of its transaction
+	// (spec, decision 3: "SELECT ... FOR UPDATE na linha da carteira").
+	FindForUpdate(ctx context.Context, id string) (*domainwallet.Wallet, error)
+	// UpdateBalance persists w's current balance and version, conditioned on
+	// previousVersion - the version the caller read at lock time - and
+	// returns ErrConcurrencyConflict if the row has since moved on.
+	UpdateBalance(ctx context.Context, w *domainwallet.Wallet, previousVersion int64) error
 }
 
-// WagerTransactionRepository persists a wager transaction. resultingBalance
-// is nil for statuses that never carry one (spec:
-// wager_transactions_resulting_balance_terminal_check); this ticket only
-// ever inserts an already-PROCESSED OPENING row, so it is always supplied
-// here.
+// ExistingTransaction is the persisted state of an external wager
+// transaction, read back either to classify an idempotency attempt
+// (IdempotencyKey, PayloadHash, ExternalTransactionID feed
+// operation.ClassifyAttempt) or, on replay, to answer with the exact result
+// the original processing computed (Status, FailureCode, ResultingBalance).
+type ExistingTransaction struct {
+	TransactionID         string
+	IdempotencyKey        string
+	PayloadHash           string
+	ExternalTransactionID string
+	Status                domainwallet.TransactionStatus
+	FailureCode           string
+	ResultingBalance      *int64
+	Currency              money.Currency
+}
+
+// WagerTransactionRepository persists and looks up a wager transaction.
+// resultingBalance is nil for statuses that never carry one (spec:
+// wager_transactions_resulting_balance_terminal_check).
 type WagerTransactionRepository interface {
+	// Insert writes an already-terminal row unconditionally - used only for
+	// the OPENING credit, which never competes with anything on the two
+	// idempotency unique constraints (both columns are NULL for an
+	// INTERNAL row).
 	Insert(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error
+	// InsertNew writes one external wager_transactions row, silently doing
+	// nothing if a concurrent writer already committed the same
+	// (providerId, idempotencyKey) or (providerId, externalTransactionId)
+	// pair - the backstop for a duplicate that used a different walletId in
+	// its body and so never contended for the same FOR UPDATE lock (spec,
+	// decision 3, step 5: "INSERT ... ON CONFLICT DO NOTHING"). inserted
+	// reports which of the two happened, so the caller knows whether it
+	// must roll back and reclassify in a fresh transaction.
+	InsertNew(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) (inserted bool, err error)
+	// FindByIdempotencyKey and FindByExternalTransactionID each return
+	// ErrNotFound when no row matches; both are scoped to providerID, since
+	// idempotency keys and external transaction ids are only unique per
+	// provider (spec: "o escopo de chaves é por provedor").
+	FindByIdempotencyKey(ctx context.Context, providerID, idempotencyKey string) (*ExistingTransaction, error)
+	FindByExternalTransactionID(ctx context.Context, providerID, externalTransactionID string) (*ExistingTransaction, error)
 }
 
 // LedgerRepository appends one immutable ledger entry.
@@ -85,4 +135,26 @@ type OutboxRecord struct {
 // commit as the domain state it announces.
 type OutboxRepository interface {
 	Insert(ctx context.Context, record OutboxRecord) error
+}
+
+// OperationMetrics records the observability signals ProcessOperationUseCase
+// emits for every attempt, regardless of channel (HTTP today; SQS once
+// ticket 13 reuses this use case). It is a port, not a direct
+// prometheus/client_golang dependency, so this package stays free of a
+// concrete metrics library (spec: "Camadas"); internal/wageringmetrics
+// implements it.
+type OperationMetrics interface {
+	// ObserveOperation records one attempt's outcome and how long it took,
+	// labeled by channel, operation kind and resulting status (spec:
+	// "operações por canal, tipo e estado" and "histograma de latência de
+	// processamento").
+	ObserveOperation(channel, kind, status string, duration time.Duration)
+	// ObserveDuplicate records one idempotent replay, by channel (spec:
+	// "duplicatas por canal").
+	ObserveDuplicate(channel string)
+	// ObserveConcurrencyConflict records one detected concurrency conflict:
+	// the step-5 INSERT backstop finding nothing to insert, or the wallet's
+	// version check failing on UPDATE (spec: "um conflito de concorrência
+	// detectado ... incrementa uma métrica").
+	ObserveConcurrencyConflict()
 }

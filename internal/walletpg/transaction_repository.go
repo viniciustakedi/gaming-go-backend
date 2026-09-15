@@ -2,8 +2,12 @@ package walletpg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/money"
 	domainwallet "github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/wallet"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/pg"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletapp"
@@ -17,19 +21,64 @@ func newWagerTransactionRepository(q pg.Querier) walletapp.WagerTransactionRepos
 	return &transactionRepository{q: q}
 }
 
-// Insert writes one wager_transactions row. Attempts, next_attempt_at and
-// pending_expires_at are left to their column defaults (0 / NULL / NULL):
-// this ticket only ever inserts an already-terminal OPENING row, which
-// never needs any of the three - the reference worker (ticket 11) is what
-// first populates them.
+// Insert writes one wager_transactions row unconditionally. Attempts,
+// next_attempt_at and pending_expires_at are left to their column defaults
+// (0 / NULL / NULL): this ticket only ever inserts an already-terminal
+// OPENING row this way, which never needs any of the three - the reference
+// worker (ticket 11) is what first populates them.
 func (r *transactionRepository) Insert(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error {
+	fields, err := transactionFields(t, resultingBalance)
+	if err != nil {
+		return err
+	}
+	if _, err := r.q.Exec(ctx, insertWagerTransactionSQL, fields...); err != nil {
+		return fmt.Errorf("walletpg: insert wager transaction: %w", err)
+	}
+	return nil
+}
+
+// InsertNew is Insert's ON CONFLICT DO NOTHING sibling for an external
+// operation, the backstop the spec calls for at decision 3, step 5: a
+// concurrent writer whose request body carried a different walletId never
+// contends for the same FOR UPDATE lock, so this INSERT - not the lock - is
+// what stops it from creating a second row for the same (providerId,
+// idempotencyKey) or (providerId, externalTransactionId) pair. inserted is
+// false exactly when that backstop fired, telling the caller to roll back
+// and reclassify the attempt in a fresh transaction rather than commit
+// nothing here and press on inside one whose own INSERT already failed to
+// affect a row.
+func (r *transactionRepository) InsertNew(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) (bool, error) {
+	fields, err := transactionFields(t, resultingBalance)
+	if err != nil {
+		return false, err
+	}
+	tag, err := r.q.Exec(ctx, insertWagerTransactionSQL+" ON CONFLICT DO NOTHING", fields...)
+	if err != nil {
+		return false, fmt.Errorf("walletpg: insert new wager transaction: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+const insertWagerTransactionSQL = `
+	INSERT INTO wager_transactions (
+		id, external_transaction_id, provider_id, idempotency_key, payload_hash,
+		wallet_id, player_id, round_id, game_id, kind, origin, amount, currency,
+		reference_external_transaction_id, reference_transaction_id, status, failure_code,
+		resulting_balance, created_at, updated_at
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`
+
+// transactionFields builds insertWagerTransactionSQL's positional arguments
+// from a domain transaction, mirroring WagerTransaction.validate(): an
+// INTERNAL row's provider metadata columns are all NULL, an EXTERNAL row's
+// are all populated.
+func transactionFields(t *domainwallet.WagerTransaction, resultingBalance *int64) ([]any, error) {
 	amount, err := t.Money().MinorUnits()
 	if err != nil {
-		return fmt.Errorf("walletpg: transaction amount: %w", err)
+		return nil, fmt.Errorf("walletpg: transaction amount: %w", err)
 	}
 	currency, err := t.Money().Currency()
 	if err != nil {
-		return fmt.Errorf("walletpg: transaction currency: %w", err)
+		return nil, fmt.Errorf("walletpg: transaction currency: %w", err)
 	}
 
 	var (
@@ -56,21 +105,55 @@ func (r *transactionRepository) Insert(ctx context.Context, t *domainwallet.Wage
 		failureCode = strPtr(t.FailureCode())
 	}
 
-	_, err = r.q.Exec(ctx, `
-		INSERT INTO wager_transactions (
-			id, external_transaction_id, provider_id, idempotency_key, payload_hash,
-			wallet_id, player_id, round_id, game_id, kind, origin, amount, currency,
-			reference_external_transaction_id, reference_transaction_id, status, failure_code,
-			resulting_balance, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+	return []any{
 		t.ID(), externalTransactionID, providerID, idempotencyKey, payloadHash,
 		t.WalletID(), t.PlayerID(), roundID, gameID, string(t.Kind()), string(t.Origin()), amount, string(currency),
 		referenceExternalID, referenceTransactionID, string(t.Status()), failureCode,
-		resultingBalance, t.CreatedAt(), t.UpdatedAt())
-	if err != nil {
-		return fmt.Errorf("walletpg: insert wager transaction: %w", err)
+		resultingBalance, t.CreatedAt(), t.UpdatedAt(),
+	}, nil
+}
+
+// FindByIdempotencyKey and FindByExternalTransactionID both look up an
+// EXTERNAL row by one of the two columns idempotency is scoped by provider
+// on (spec: "o escopo de chaves é por provedor"); an INTERNAL row's
+// provider_id is always NULL, so neither can ever match one.
+func (r *transactionRepository) FindByIdempotencyKey(ctx context.Context, providerID, idempotencyKey string) (*walletapp.ExistingTransaction, error) {
+	return r.findExisting(ctx, `
+		SELECT id, external_transaction_id, idempotency_key, payload_hash, status, failure_code, resulting_balance, currency
+		FROM wager_transactions
+		WHERE provider_id = $1 AND idempotency_key = $2`, providerID, idempotencyKey)
+}
+
+func (r *transactionRepository) FindByExternalTransactionID(ctx context.Context, providerID, externalTransactionID string) (*walletapp.ExistingTransaction, error) {
+	return r.findExisting(ctx, `
+		SELECT id, external_transaction_id, idempotency_key, payload_hash, status, failure_code, resulting_balance, currency
+		FROM wager_transactions
+		WHERE provider_id = $1 AND external_transaction_id = $2`, providerID, externalTransactionID)
+}
+
+func (r *transactionRepository) findExisting(ctx context.Context, sql, providerID, key string) (*walletapp.ExistingTransaction, error) {
+	row := r.q.QueryRow(ctx, sql, providerID, key)
+
+	var (
+		id, externalTransactionID, idempotencyKey, payloadHash, status, currency string
+		failureCode                                                              *string
+		resultingBalance                                                         *int64
+	)
+	if err := row.Scan(&id, &externalTransactionID, &idempotencyKey, &payloadHash, &status, &failureCode, &resultingBalance, &currency); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, walletapp.ErrNotFound
+		}
+		return nil, fmt.Errorf("walletpg: find wager transaction: %w", err)
 	}
-	return nil
+
+	record := &walletapp.ExistingTransaction{
+		TransactionID: id, IdempotencyKey: idempotencyKey, PayloadHash: payloadHash, ExternalTransactionID: externalTransactionID,
+		Status: domainwallet.TransactionStatus(status), ResultingBalance: resultingBalance, Currency: money.Currency(currency),
+	}
+	if failureCode != nil {
+		record.FailureCode = *failureCode
+	}
+	return record, nil
 }
 
 func strPtr(s string) *string { return &s }

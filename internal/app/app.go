@@ -15,6 +15,7 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/outboxpg"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/pg"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/queue"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/wageringmetrics"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletpg"
 )
 
@@ -29,6 +30,7 @@ var Modules = fx.Options(
 	pg.Module,
 	queue.Module,
 	auth.Module,
+	wageringmetrics.Module,
 	walletpg.Module,
 	outboxpg.Module,
 	outbox.Module,

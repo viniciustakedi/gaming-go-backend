@@ -69,10 +69,28 @@ func (r *walletRepository) Insert(ctx context.Context, w *domainwallet.Wallet) e
 }
 
 func (r *walletRepository) FindByID(ctx context.Context, id string) (*domainwallet.Wallet, error) {
-	row := r.q.QueryRow(ctx, `
+	return r.find(ctx, `
 		SELECT id, player_id, currency, balance, version, created_at, updated_at
 		FROM wallets
 		WHERE id = $1`, id)
+}
+
+// FindForUpdate is FindByID's exact query plus FOR UPDATE, so the caller
+// holds an exclusive row lock on the wallet for the rest of its transaction
+// (spec, decision 3, step 2: "SELECT ... FOR UPDATE na linha da carteira").
+// Only ever called against a transaction-bound Querier - locking through the
+// bare pool would release the lock the instant this single statement's
+// implicit transaction ends.
+func (r *walletRepository) FindForUpdate(ctx context.Context, id string) (*domainwallet.Wallet, error) {
+	return r.find(ctx, `
+		SELECT id, player_id, currency, balance, version, created_at, updated_at
+		FROM wallets
+		WHERE id = $1
+		FOR UPDATE`, id)
+}
+
+func (r *walletRepository) find(ctx context.Context, sql string, id string) (*domainwallet.Wallet, error) {
+	row := r.q.QueryRow(ctx, sql, id)
 
 	var (
 		walletID, playerID, currency string
@@ -95,4 +113,29 @@ func (r *walletRepository) FindByID(ctx context.Context, id string) (*domainwall
 		ID: walletID, PlayerID: playerID, Currency: money.Currency(currency), Balance: balanceValue,
 		Version: version, CreatedAt: createdAt, UpdatedAt: updatedAt,
 	})
+}
+
+// UpdateBalance persists w's current balance and version, conditioned on
+// previousVersion so a writer that no longer holds the row's lock can never
+// silently overwrite a newer state (spec: "UPDATE da carteira com WHERE
+// version = <lida>" - defense in depth alongside the FOR UPDATE lock, not a
+// substitute for it).
+func (r *walletRepository) UpdateBalance(ctx context.Context, w *domainwallet.Wallet, previousVersion int64) error {
+	balance, err := w.Balance().MinorUnits()
+	if err != nil {
+		return fmt.Errorf("walletpg: wallet balance: %w", err)
+	}
+
+	tag, err := r.q.Exec(ctx, `
+		UPDATE wallets
+		SET balance = $1, version = $2, updated_at = $3
+		WHERE id = $4 AND version = $5`,
+		balance, w.Version(), w.UpdatedAt(), w.ID(), previousVersion)
+	if err != nil {
+		return fmt.Errorf("walletpg: update wallet balance: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return walletapp.ErrConcurrencyConflict
+	}
+	return nil
 }
