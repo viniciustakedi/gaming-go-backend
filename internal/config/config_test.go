@@ -3,7 +3,8 @@ package config
 import "testing"
 
 func TestLoad_MissingRequiredValues(t *testing.T) {
-	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DATABASE_HOST", "")
+	t.Setenv("DATABASE_NAME", "")
 	t.Setenv("SQS_ENDPOINT_URL", "")
 	t.Setenv("SQS_CONSUMER_ACCESS_KEY_ID", "")
 	t.Setenv("SQS_CONSUMER_SECRET_ACCESS_KEY", "")
@@ -47,7 +48,7 @@ func TestLoad_ValidEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("want no error, got %v", err)
 	}
-	if cfg.Postgres.DSN != "postgres://user:pass@localhost:5432/wallet" {
+	if cfg.Postgres.DSN != "postgres://localhost:5432/wallet?sslmode=disable" {
 		t.Errorf("unexpected DSN: %q", cfg.Postgres.DSN)
 	}
 	if cfg.SQS.InputQueueName != "wager-transactions.fifo" {
@@ -55,15 +56,29 @@ func TestLoad_ValidEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoad_RejectsUserinfoInDatabaseHost(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+	t.Setenv("DATABASE_HOST", "wallet:wallet@localhost")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("want error when DATABASE_HOST carries userinfo, got nil")
+	}
+}
+
 func TestLoad_RejectsNonPositiveDurations(t *testing.T) {
 	cases := map[string]string{
-		"HTTP_READ_TIMEOUT":      "0s",
-		"HTTP_WRITE_TIMEOUT":     "-1s",
-		"HTTP_SHUTDOWN_TIMEOUT":  "0s",
-		"HTTP_READINESS_TIMEOUT": "-2s",
-		"DATABASE_PING_TIMEOUT":  "0s",
-		"SQS_STARTUP_TIMEOUT":    "-5s",
-		"FX_STOP_TIMEOUT":        "0s",
+		"HTTP_READ_TIMEOUT":          "0s",
+		"HTTP_WRITE_TIMEOUT":         "-1s",
+		"HTTP_SHUTDOWN_TIMEOUT":      "0s",
+		"HTTP_READINESS_TIMEOUT":     "-2s",
+		"DATABASE_PING_TIMEOUT":      "0s",
+		"DATABASE_LOCK_TIMEOUT":      "0s",
+		"DATABASE_STATEMENT_TIMEOUT": "-1s",
+		"SQS_STARTUP_TIMEOUT":        "-5s",
+		"FX_STOP_TIMEOUT":            "0s",
 	}
 	for key, value := range cases {
 		t.Run(key+"="+value, func(t *testing.T) {
@@ -112,7 +127,8 @@ func TestLoad_InvalidLogLevel(t *testing.T) {
 func validEnv(t *testing.T) map[string]string {
 	t.Helper()
 	return map[string]string{
-		"DATABASE_URL":                    "postgres://user:pass@localhost:5432/wallet",
+		"DATABASE_HOST":                   "localhost",
+		"DATABASE_NAME":                   "wallet",
 		"SQS_ENDPOINT_URL":                "http://localhost:4566",
 		"SQS_CONSUMER_ACCESS_KEY_ID":      "AKIACONSUMER",
 		"SQS_CONSUMER_SECRET_ACCESS_KEY":  "consumer-secret",

@@ -8,8 +8,11 @@ package app_test
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,8 +20,24 @@ import (
 	"go.uber.org/fx/fxtest"
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/app"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/envfile"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/httpapi"
 )
+
+// readEnvFile reads path with envfile.Read, appending the
+// scripts/wait-for-integration.sh hint to a missing-file error - envfile's
+// own message stays neutral for its production callers (internal/pg).
+func readEnvFile(t *testing.T, path string) map[string]string {
+	t.Helper()
+	values, err := envfile.Read(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("%v - run scripts/wait-for-integration.sh first", err)
+		}
+		t.Fatalf("%v", err)
+	}
+	return values
+}
 
 // TestApp_StartStop_ReleasesResources proves the whole Fx graph - config,
 // logging, metrics, postgres, sqs, http - starts, serves on an
@@ -71,7 +90,7 @@ func TestApp_StartStop_ReleasesResources(t *testing.T) {
 // component, no port bound, no database connection attempted.
 func TestApp_StartFailsWithInvalidConfig(t *testing.T) {
 	setIntegrationEnv(t)
-	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DATABASE_HOST", "")
 
 	fxApp := fx.New(app.Modules)
 
@@ -86,22 +105,34 @@ func TestApp_StartFailsWithInvalidConfig(t *testing.T) {
 func setIntegrationEnv(t *testing.T) {
 	t.Helper()
 	for _, kv := range []struct{ key, fallback string }{
-		{"DATABASE_URL", "postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable"},
+		// Credential-free on purpose - config.Load rejects userinfo here,
+		// the same shape docker-compose.yml's app service receives. The
+		// migration owner's own DATABASE_URL (with credentials) is never
+		// read by this process, only by `wallet-service migrate`.
+		{"DATABASE_HOST", "localhost"},
+		{"DATABASE_PORT", "5432"},
+		{"DATABASE_NAME", "wallet"},
+		{"DATABASE_SSLMODE", "disable"},
 		{"SQS_ENDPOINT_URL", "http://localhost:4566"},
 	} {
 		if os.Getenv(kv.key) == "" {
 			t.Setenv(kv.key, kv.fallback)
 		}
 	}
-	requireEnv(t, "SQS_CONSUMER_ACCESS_KEY_ID")
-	requireEnv(t, "SQS_CONSUMER_SECRET_ACCESS_KEY")
-	requireEnv(t, "SQS_PUBLISHER_ACCESS_KEY_ID")
-	requireEnv(t, "SQS_PUBLISHER_SECRET_ACCESS_KEY")
-}
+	// pg.New (internal/pg) adds wallet_app's own credentials on top of the
+	// credential-free DSN above, reading the password from this file - the
+	// same one deploy/postgres/provision.sh writes and test/integration's
+	// own walletAppPassword helper reads (see README.md, "Credenciais do
+	// Postgres").
+	t.Setenv("DATABASE_APP_CREDENTIALS_FILE", filepath.Join("..", "..", "deploy", "postgres", ".runtime", "credentials.env"))
 
-func requireEnv(t *testing.T, key string) {
-	t.Helper()
-	if os.Getenv(key) == "" {
-		t.Skipf("%s not set - run against `docker compose up provisioning` and source deploy/ministack/.credentials.env first, see README.md", key)
+	appCredentialsFile := filepath.Join("..", "..", "deploy", "ministack", ".runtime", "app-credentials.env")
+	appCreds := readEnvFile(t, appCredentialsFile)
+	for _, key := range []string{"SQS_CONSUMER_ACCESS_KEY_ID", "SQS_CONSUMER_SECRET_ACCESS_KEY", "SQS_PUBLISHER_ACCESS_KEY_ID", "SQS_PUBLISHER_SECRET_ACCESS_KEY"} {
+		v, ok := appCreds[key]
+		if !ok || v == "" {
+			t.Fatalf("missing %s in %s - run scripts/wait-for-integration.sh first", key, appCredentialsFile)
+		}
+		t.Setenv(key, v)
 	}
 }

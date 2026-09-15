@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
@@ -18,12 +19,32 @@ import (
 // and prepares the pool; the OnStart hook registered below is what proves
 // connectivity, with a bounded timeout, before the app is allowed to serve
 // traffic.
+//
+// The pool connects as wallet_app, never as the migration owner: cfg.
+// Postgres.DSN itself never carries any credential (internal/config.Load
+// assembles it from host/port/database/sslmode alone) - AppDSN adds
+// wallet_app's own, read from AppCredentialsFile, before any connection is
+// opened (spec: "a aplicação usa outro [papel], com apenas os grants
+// necessários").
 func New(cfg config.Config) (*pgxpool.Pool, error) {
-	poolCfg, err := pgxpool.ParseConfig(cfg.Postgres.DSN)
+	dsn, err := AppDSN(cfg.Postgres.DSN, cfg.Postgres.AppCredentialsFile)
+	if err != nil {
+		return nil, fmt.Errorf("pg: derive wallet_app dsn: %w", err)
+	}
+
+	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("pg: parse DATABASE_URL: %w", err)
 	}
 	poolCfg.MaxConns = cfg.Postgres.MaxConns
+
+	// lock_timeout and statement_timeout are sent as startup parameters on
+	// every physical connection the pool opens, so every session the
+	// application ever queries through enforces them - not just the first
+	// one. Exceeding either is a transitory failure the caller retries
+	// (spec: "estourar qualquer um deles é falha transitória").
+	poolCfg.ConnConfig.RuntimeParams["lock_timeout"] = strconv.FormatInt(cfg.Postgres.LockTimeout.Milliseconds(), 10)
+	poolCfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(cfg.Postgres.StatementTimeout.Milliseconds(), 10)
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {

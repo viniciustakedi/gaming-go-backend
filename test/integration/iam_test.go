@@ -35,7 +35,6 @@
 package integration
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -63,31 +62,6 @@ type roleCreds struct {
 	redriveInputQueueName  string
 	redriveDLQQueueName    string
 	redriveMaxReceiveCount int
-}
-
-// readEnvFile parses a KEY=VALUE file (as provision.sh writes) into dst,
-// skipping blank lines and comments. Missing files skip the whole test:
-// provisioning has not run yet.
-func readEnvFile(t *testing.T, path string, dst map[string]string) {
-	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Skipf("cannot read %s: %v - run `docker compose up provisioning` first, see README.md", path, err)
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		dst[k] = v
-	}
 }
 
 func testEndpoint() string {
@@ -125,7 +99,10 @@ func loadTestCreds(t *testing.T) roleCreds {
 		if path == "" {
 			path = kv.fallback
 		}
-		readEnvFile(t, path, values)
+		parsed := readEnvFile(t, path)
+		for k, v := range parsed {
+			values[k] = v
+		}
 	}
 
 	get := func(k string) string {
