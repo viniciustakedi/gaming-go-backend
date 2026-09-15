@@ -74,6 +74,14 @@ func (fakeNoopTransactionRepository) ExistsSuccessfulReversal(ctx context.Contex
 	return false, nil
 }
 
+func (fakeNoopTransactionRepository) FindDetailByID(ctx context.Context, id string) (*walletapp.TransactionDetail, error) {
+	return nil, walletapp.ErrNotFound
+}
+
+func (fakeNoopTransactionRepository) FindDetailByProviderExternalID(ctx context.Context, providerID, externalTransactionID string) (*walletapp.TransactionDetail, error) {
+	return nil, walletapp.ErrNotFound
+}
+
 type fakeNoopLedgerRepository struct{}
 
 func (fakeNoopLedgerRepository) Insert(ctx context.Context, entry *domainwallet.WalletLedgerEntry) error {

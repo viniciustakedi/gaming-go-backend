@@ -62,7 +62,7 @@ func TestRegisterLifecycle_EarlierHookFailureLeavesPortFree(t *testing.T) {
 	cfg := testHTTPConfig(addr)
 	logger := discardLogger()
 
-	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil, nil, nil)
+	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestRegisterLifecycle_StopReleasesPortForRetry(t *testing.T) {
 	logger := discardLogger()
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil, nil, nil)
+		server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("attempt %d: New: %v", attempt, err)
 		}
@@ -124,7 +124,7 @@ func TestRegisterLifecycle_StopReleasesPortForRetry(t *testing.T) {
 func TestServer_BusinessNamespace_AuthenticatesBeforeRouting(t *testing.T) {
 	verifier := fakeVerifier{identity: auth.Identity{Subject: "wallet-service-sub", Roles: []string{auth.RoleWalletAdmin}}}
 	cfg := testHTTPConfig(freeAddr(t))
-	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, discardLogger(), verifier, nil, nil, nil, nil)
+	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, discardLogger(), verifier, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -167,6 +167,47 @@ func TestServer_BusinessNamespace_AuthenticatesBeforeRouting(t *testing.T) {
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d, body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestServer_WalletsRoutes_ProviderWithWalletAdminNoProviderID_Preserves403
+// proves the re-review fix (Major #1): the wallet-admin-wins precedence
+// requireAnyRole added for the two read routes must not reach /wallets* or
+// POST /wagering/transactions, which keep requireRole - the exact same
+// implementation as before ticket 09 touched auth_middleware.go. On main,
+// a token carrying both provider and wallet-admin roles but no provider_id
+// is rejected as forbidden by requireRole's own global provider_id check,
+// before the wallet-admin role is even considered; that must still hold
+// here.
+func TestServer_WalletsRoutes_ProviderWithWalletAdminNoProviderID_Preserves403(t *testing.T) {
+	verifier := fakeVerifier{identity: auth.Identity{
+		Subject: "sub",
+		Roles:   []string{auth.RoleProvider, auth.RoleWalletAdmin},
+	}}
+	cfg := testHTTPConfig(freeAddr(t))
+	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, discardLogger(), verifier, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	cases := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/wallets"},
+		{http.MethodGet, "/wallets/w-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Authorization", "Bearer whatever")
+			rec := httptest.NewRecorder()
+			server.HTTP.Handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 (same as main), body = %s", rec.Code, rec.Body.String())
 			}
 		})
 	}

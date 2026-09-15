@@ -112,6 +112,8 @@ func messageForCode(code operation.Code) string {
 		return "currency is not in the supported allowlist"
 	case operation.CodeWalletNotFound:
 		return "no wallet exists with this id"
+	case operation.CodeTransactionNotFound:
+		return "no transaction exists with this id, or you are not authorized to see it"
 	case operation.CodeWalletAlreadyExists:
 		return "a wallet already exists for this player and currency"
 	case operation.CodeTemporarilyUnavailable:

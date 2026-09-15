@@ -75,6 +75,51 @@ func requireRole(role string, next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// requireAnyRole is requireRole's multi-role sibling, for the two read
+// routes ticket 09 adds: both a provider and wallet-admin may call them
+// (spec, "Autenticação e autorização", "GET /wagering/transactions/:id:
+// provider só vê as próprias transações ...; wallet-admin vê todas"), and
+// which one decides the caller's own visibility rule inside the use case,
+// not at this layer - this middleware only proves the caller has at least
+// one of the roles the route accepts.
+//
+// Precedence (the one place this is decided, ticket 09 review): wallet-admin
+// wins whenever the route accepts it, so a token carrying both roles is
+// never asked for provider_id - it already sees everything as an admin.
+// provider_id is only required from a caller acting as a provider, i.e. one
+// that does not clear the route on wallet-admin alone.
+func requireAnyRole(roles []string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		identity, ok := auth.IdentityFromContext(r.Context())
+		if !ok {
+			writeAuthError(w, http.StatusUnauthorized, codeUnauthorized, "missing or malformed bearer token")
+			return
+		}
+		if roleAccepted(roles, auth.RoleWalletAdmin) && identity.HasRole(auth.RoleWalletAdmin) {
+			next(w, r)
+			return
+		}
+		if roleAccepted(roles, auth.RoleProvider) && identity.HasRole(auth.RoleProvider) {
+			if identity.ProviderID == "" {
+				writeAuthError(w, http.StatusForbidden, codeForbidden, "provider token carries no provider_id claim")
+				return
+			}
+			next(w, r)
+			return
+		}
+		writeAuthError(w, http.StatusForbidden, codeForbidden, "caller does not have the required role")
+	}
+}
+
+func roleAccepted(roles []string, role string) bool {
+	for _, candidate := range roles {
+		if candidate == role {
+			return true
+		}
+	}
+	return false
+}
+
 // bearerToken extracts the token from a well-formed "Authorization: Bearer
 // <token>" header. The scheme is matched case-insensitively - HTTP auth
 // schemes are case-insensitive per RFC 7235 §2.1, and Keycloak client
