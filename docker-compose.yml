@@ -1,0 +1,104 @@
+name: jungle-gaming-wallet
+
+x-app-image: &app-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wallet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wallet}
+      POSTGRES_DB: ${POSTGRES_DB:-wallet}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wallet} -d ${POSTGRES_DB:-wallet}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # AUTH=true turns on MiniStack's IAM enforcement. No AWS_ACCESS_KEY_ID is
+  # set here on purpose: setting it would make that key MiniStack's root
+  # key, which bypasses every IAM policy - see alignment.md.
+  ministack:
+    image: ministackorg/ministack:1.5.12
+    environment:
+      AUTH: "true"
+    ports:
+      - "${MINISTACK_PORT:-4566}:4566"
+
+  # One-shot: creates the queues, the DLQ redrive, the four least-privilege
+  # IAM users (gateway, consumer, publisher, events-reader) and the IAM test
+  # fixtures (deny-probe, redrive-tester - see provision.sh), then writes
+  # two credential files under deploy/ministack/.runtime - bind-mounted, not
+  # a named volume, so `go test -tags integration ./...` run straight from
+  # the host can read the test one. It is the only service in this whole
+  # file, and the only place in the repository, that ever holds MiniStack's
+  # root credentials. The image is pinned by tag and digest so the same
+  # checkout cannot silently start running a different provisioner.
+  provisioning:
+    image: amazon/aws-cli:2.31.13@sha256:e14216fb361cce909ce199616711ad103182d5937f851cda9bebf25867d7180a
+    entrypoint: ["/bin/sh", "/provision.sh"]
+    environment:
+      AWS_DEFAULT_REGION: ${SQS_REGION:-us-east-1}
+      MINISTACK_ENDPOINT_URL: http://ministack:4566
+      SQS_INPUT_QUEUE_NAME: ${SQS_INPUT_QUEUE_NAME:-wager-transactions.fifo}
+      SQS_DLQ_QUEUE_NAME: ${SQS_DLQ_QUEUE_NAME:-wager-transactions-dlq.fifo}
+      SQS_OUTPUT_QUEUE_NAME: ${SQS_OUTPUT_QUEUE_NAME:-wallet-events.fifo}
+      WAGER_TRANSACTIONS_MAX_RECEIVE_COUNT: ${WAGER_TRANSACTIONS_MAX_RECEIVE_COUNT:-5}
+      IAM_RUNTIME_DIR: /shared
+      APP_CREDENTIALS_FILE: /shared/app-credentials.env
+      TEST_CREDENTIALS_FILE: /shared/test-credentials.env
+      APP_RUNTIME_UID: "10001"
+      APP_RUNTIME_GID: "10001"
+    volumes:
+      - ./deploy/ministack/provision.sh:/provision.sh:ro
+      - ./deploy/ministack/.runtime:/shared
+    depends_on:
+      - ministack
+
+  migrate:
+    <<: *app-image
+    command: ["migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-wallet}:${POSTGRES_PASSWORD:-wallet}@postgres:5432/${POSTGRES_DB:-wallet}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    <<: *app-image
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    environment:
+      HTTP_ADDR: :8080
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER:-wallet}:${POSTGRES_PASSWORD:-wallet}@postgres:5432/${POSTGRES_DB:-wallet}?sslmode=disable
+      SQS_ENDPOINT_URL: http://ministack:4566
+      SQS_REGION: ${SQS_REGION:-us-east-1}
+      SQS_INPUT_QUEUE_NAME: ${SQS_INPUT_QUEUE_NAME:-wager-transactions.fifo}
+      SQS_DLQ_QUEUE_NAME: ${SQS_DLQ_QUEUE_NAME:-wager-transactions-dlq.fifo}
+      SQS_OUTPUT_QUEUE_NAME: ${SQS_OUTPUT_QUEUE_NAME:-wallet-events.fifo}
+      IAM_CREDENTIALS_FILE: /shared/app-credentials.env
+      # SQS_CONSUMER_ACCESS_KEY_ID, SQS_CONSUMER_SECRET_ACCESS_KEY,
+      # SQS_PUBLISHER_ACCESS_KEY_ID and SQS_PUBLISHER_SECRET_ACCESS_KEY are
+      # deliberately not set here: deploy/docker/entrypoint.sh sources them
+      # from the file provisioning wrote, since they only exist after that
+      # container has run.
+    volumes:
+      # Only the app's own file is mounted - never the whole .runtime
+      # directory - so this container has no path to gateway, events-reader
+      # or IAM test fixture keys, only its own consumer/publisher pair.
+      # provision.sh chowns this file to the same UID/GID the Dockerfile's
+      # non-root "app" user runs as, so it stays readable despite mode 0600.
+      - ./deploy/ministack/.runtime/app-credentials.env:/shared/app-credentials.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      provisioning:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
