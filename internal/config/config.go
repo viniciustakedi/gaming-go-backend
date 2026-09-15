@@ -21,6 +21,7 @@ type Config struct {
 	Postgres PostgresConfig
 	SQS      SQSConfig
 	Outbox   OutboxConfig
+	Auth     AuthConfig
 	Fx       FxConfig
 }
 
@@ -84,6 +85,33 @@ type OutboxConfig struct {
 
 type FxConfig struct {
 	StopTimeout time.Duration
+}
+
+type AuthConfig struct {
+	// IssuerURL is the exact "iss" claim every accepted token must carry -
+	// internal/auth's verifier rejects a token whose issuer does not match
+	// this string byte for byte, regardless of which host DiscoveryURL
+	// below actually reaches.
+	IssuerURL string
+	// DiscoveryURL is the OIDC discovery endpoint's base
+	// (discoveryURL + "/.well-known/openid-configuration"), used only to
+	// fetch the provider's configuration and JWKS - never compared against
+	// a token's "iss". It defaults to IssuerURL, the right value whenever a
+	// single host reaches Keycloak (local `go test`, test/integration), and
+	// is set to Keycloak's internal Compose address for the app container,
+	// which cannot reach IssuerURL's host-facing address (ticket 07:
+	// "separe issuer esperado de URL de descoberta e JWKS").
+	DiscoveryURL string
+	// Audience is the "aud" every accepted token must carry - the audience
+	// mapper on each Keycloak client in this realm stamps it there (spec,
+	// decision 7).
+	Audience string
+	// ClockSkew is the tolerance internal/auth's verifier grants a token's
+	// expiry against this process's own clock.
+	ClockSkew time.Duration
+	// DiscoveryTimeout bounds how long internal/auth retries OIDC discovery
+	// on start - see internal/auth.RegisterLifecycle.
+	DiscoveryTimeout time.Duration
 }
 
 // rootAccessKeyID12Digits matches MiniStack's other bypass form: any
@@ -185,6 +213,25 @@ func Load() (Config, error) {
 	if cfg.Outbox.RetryMax < cfg.Outbox.RetryBase {
 		errs = append(errs, fmt.Errorf("OUTBOX_RETRY_MAX: must be greater than or equal to OUTBOX_RETRY_BASE"))
 	}
+
+	cfg.Auth.IssuerURL = getEnv("AUTH_ISSUER_URL", "")
+	if cfg.Auth.IssuerURL == "" {
+		errs = append(errs, errors.New("AUTH_ISSUER_URL: required"))
+	}
+	cfg.Auth.DiscoveryURL = getEnv("AUTH_DISCOVERY_URL", "")
+	if cfg.Auth.DiscoveryURL == "" {
+		cfg.Auth.DiscoveryURL = cfg.Auth.IssuerURL
+	}
+	cfg.Auth.Audience = getEnv("AUTH_AUDIENCE", "wallet-api")
+	if cfg.Auth.Audience == "" {
+		errs = append(errs, errors.New("AUTH_AUDIENCE: must not be empty"))
+	}
+	cfg.Auth.ClockSkew = getDuration("AUTH_CLOCK_SKEW", 5*time.Second, &errs)
+	// Keycloak's own boot - including the realm import docker-compose.yml's
+	// keycloak service runs on every cold start - routinely takes longer
+	// than every other dependency this process waits on, so the default
+	// here is generous rather than matched to SQS_STARTUP_TIMEOUT's 10s.
+	cfg.Auth.DiscoveryTimeout = getDuration("AUTH_DISCOVERY_TIMEOUT", 45*time.Second, &errs)
 
 	cfg.Fx.StopTimeout = getDuration("FX_STOP_TIMEOUT", 30*time.Second, &errs)
 

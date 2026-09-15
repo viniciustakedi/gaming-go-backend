@@ -10,11 +10,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/fx"
 
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/auth"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/config"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/health"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletapp"
@@ -49,26 +51,49 @@ func (s *Server) Addr() string {
 	return s.Listener.Addr().String()
 }
 
-func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessChecks, logger *slog.Logger, openWallet *walletapp.OpenWalletUseCase, getWallet *walletapp.GetWalletUseCase) (*Server, error) {
+func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessChecks, logger *slog.Logger, verifier auth.Verifier, openWallet *walletapp.OpenWalletUseCase, getWallet *walletapp.GetWalletUseCase) (*Server, error) {
 	readiness := NewReadiness(checks.Checks, cfg.HTTP.ReadinessTimeout)
 	latency := newHTTPLatency(registry)
 
+	// Every /wallets* route requires the wallet-admin realm role, checked by
+	// requireRole once the mux has matched a route. /health/* and /metrics
+	// stay unauthenticated (spec, decision 7).
 	mux := http.NewServeMux()
 	mux.Handle("GET /health/live", liveHandler())
 	mux.Handle("GET /health/ready", readyHandler(readiness))
 	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{Registry: registry}))
-	mux.Handle("POST /wallets", latency.wrap("POST /wallets", openWalletHandler(openWallet, logger)))
-	mux.Handle("GET /wallets/{walletId}", latency.wrap("GET /wallets/{walletId}", getWalletHandler(getWallet, logger)))
+	mux.Handle("POST /wallets", latency.wrap("POST /wallets", requireRole(auth.RoleWalletAdmin, openWalletHandler(openWallet, logger))))
+	mux.Handle("GET /wallets/{walletId}", latency.wrap("GET /wallets/{walletId}", requireRole(auth.RoleWalletAdmin, getWalletHandler(getWallet, logger))))
 
 	return &Server{
 		HTTP: &http.Server{
-			Handler:      mux,
+			// authenticate wraps the whole mux, not just its matched routes,
+			// so a business-namespace request the mux itself would answer
+			// with a public 404/405 (an unmapped method, a typo'd path)
+			// still requires a valid token first (ticket 07 review: "PUT
+			// /wallets sem token recebe o 405 público do mux, em vez de
+			// 401").
+			Handler:      authenticate(verifier, isPublicRoute, mux),
 			ReadTimeout:  cfg.HTTP.ReadTimeout,
 			WriteTimeout: cfg.HTTP.WriteTimeout,
 		},
 		Readiness: readiness,
 		addr:      cfg.HTTP.Addr,
 	}, nil
+}
+
+// isPublicRoute reports whether r's path is exempt from authentication:
+// health checks and metrics (spec, decision 7: "/health/* é público. /metrics
+// é público"). Everything else - today just /wallets*, and later /wagering*
+// and /providers* without any change to this function (ticket 07: "o
+// desenho deve acomodar /wagering e /providers sem mudança estrutural") - is
+// business namespace and default-denied by authenticate until proven public
+// here.
+func isPublicRoute(r *http.Request) bool {
+	if r.URL.Path == "/metrics" {
+		return true
+	}
+	return strings.HasPrefix(r.URL.Path, "/health/")
 }
 
 // RegisterLifecycle binds the listener and starts serving in a background

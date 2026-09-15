@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxtest"
 
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/auth"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/config"
 )
 
@@ -59,7 +62,7 @@ func TestRegisterLifecycle_EarlierHookFailureLeavesPortFree(t *testing.T) {
 	cfg := testHTTPConfig(addr)
 	logger := discardLogger()
 
-	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil)
+	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -93,7 +96,7 @@ func TestRegisterLifecycle_StopReleasesPortForRetry(t *testing.T) {
 	logger := discardLogger()
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil)
+		server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("attempt %d: New: %v", attempt, err)
 		}
@@ -107,5 +110,64 @@ func TestRegisterLifecycle_StopReleasesPortForRetry(t *testing.T) {
 		if err := lc.Stop(context.Background()); err != nil {
 			t.Fatalf("attempt %d: Stop: %v", attempt, err)
 		}
+	}
+}
+
+// TestServer_BusinessNamespace_AuthenticatesBeforeRouting proves ticket 07
+// review's fix directly: a method New's mux never registers for /wallets or
+// /wallets/{walletId} (PUT, DELETE, PATCH, HEAD, OPTIONS) must answer 401
+// when unauthenticated - not the mux's own public 405 - and, once a valid
+// token is presented, fall through to the mux's ordinary 405 for a method
+// no route maps. This exercises Server.HTTP.Handler exactly as
+// RegisterLifecycle serves it, so it also proves authenticate really does
+// wrap the whole mux, not just the two registered routes.
+func TestServer_BusinessNamespace_AuthenticatesBeforeRouting(t *testing.T) {
+	verifier := fakeVerifier{identity: auth.Identity{Subject: "wallet-service-sub", Roles: []string{auth.RoleWalletAdmin}}}
+	cfg := testHTTPConfig(freeAddr(t))
+	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, discardLogger(), verifier, nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	cases := []struct {
+		method     string
+		path       string
+		token      bool
+		wantStatus int
+	}{
+		{http.MethodPut, "/wallets", false, http.StatusUnauthorized},
+		{http.MethodPut, "/wallets", true, http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/wallets", false, http.StatusUnauthorized},
+		{http.MethodDelete, "/wallets", true, http.StatusMethodNotAllowed},
+		{http.MethodPatch, "/wallets", false, http.StatusUnauthorized},
+		{http.MethodPatch, "/wallets", true, http.StatusMethodNotAllowed},
+		{http.MethodPut, "/wallets/w-1", false, http.StatusUnauthorized},
+		{http.MethodPut, "/wallets/w-1", true, http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/wallets/w-1", false, http.StatusUnauthorized},
+		{http.MethodDelete, "/wallets/w-1", true, http.StatusMethodNotAllowed},
+		{http.MethodPatch, "/wallets/w-1", false, http.StatusUnauthorized},
+		{http.MethodPatch, "/wallets/w-1", true, http.StatusMethodNotAllowed},
+		{http.MethodHead, "/wallets", false, http.StatusUnauthorized},
+		{http.MethodOptions, "/wallets", false, http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		name := tc.method + " " + tc.path
+		if tc.token {
+			name += " (with token)"
+		} else {
+			name += " (no token)"
+		}
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			if tc.token {
+				req.Header.Set("Authorization", "Bearer whatever")
+			}
+			rec := httptest.NewRecorder()
+			server.HTTP.Handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d, body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
 	}
 }

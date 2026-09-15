@@ -180,6 +180,7 @@ func publisherTestDependencies(t *testing.T) (config.Config, *pgxpool.Pool, *que
 	t.Setenv("DATABASE_SSLMODE", sslmode)
 	t.Setenv("DATABASE_APP_CREDENTIALS_FILE", filepath.Join("..", "..", "deploy", "postgres", ".runtime", "credentials.env"))
 	t.Setenv("SQS_ENDPOINT_URL", "http://localhost:4566")
+	t.Setenv("AUTH_ISSUER_URL", "http://localhost:8081/realms/wallet")
 
 	credentialsPath := filepath.Join("..", "..", "deploy", "ministack", ".runtime", "app-credentials.env")
 	values, err := envfile.Read(credentialsPath)

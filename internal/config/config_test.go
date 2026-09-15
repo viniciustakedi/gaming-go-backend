@@ -10,6 +10,7 @@ func TestLoad_MissingRequiredValues(t *testing.T) {
 	t.Setenv("SQS_CONSUMER_SECRET_ACCESS_KEY", "")
 	t.Setenv("SQS_PUBLISHER_ACCESS_KEY_ID", "")
 	t.Setenv("SQS_PUBLISHER_SECRET_ACCESS_KEY", "")
+	t.Setenv("AUTH_ISSUER_URL", "")
 
 	_, err := Load()
 	if err == nil {
@@ -54,6 +55,66 @@ func TestLoad_ValidEnvironment(t *testing.T) {
 	if cfg.SQS.InputQueueName != "wager-transactions.fifo" {
 		t.Errorf("unexpected default input queue name: %q", cfg.SQS.InputQueueName)
 	}
+	if cfg.Auth.Audience != "wallet-api" {
+		t.Errorf("unexpected default audience: %q", cfg.Auth.Audience)
+	}
+}
+
+func TestLoad_MissingIssuerURL(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+	t.Setenv("AUTH_ISSUER_URL", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("want error for missing AUTH_ISSUER_URL, got nil")
+	}
+}
+
+func TestLoad_RejectsEmptyAudience(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+	t.Setenv("AUTH_AUDIENCE", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("want error for empty AUTH_AUDIENCE, got nil")
+	}
+}
+
+func TestLoad_DiscoveryURLDefaultsToIssuerURL(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+	t.Setenv("AUTH_DISCOVERY_URL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("want no error, got %v", err)
+	}
+	if cfg.Auth.DiscoveryURL != cfg.Auth.IssuerURL {
+		t.Errorf("DiscoveryURL = %q, want it to default to IssuerURL %q", cfg.Auth.DiscoveryURL, cfg.Auth.IssuerURL)
+	}
+}
+
+func TestLoad_DiscoveryURLOverride(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+	t.Setenv("AUTH_DISCOVERY_URL", "http://keycloak:8080/realms/wallet")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("want no error, got %v", err)
+	}
+	if cfg.Auth.DiscoveryURL != "http://keycloak:8080/realms/wallet" {
+		t.Errorf("DiscoveryURL = %q, want the explicit override", cfg.Auth.DiscoveryURL)
+	}
+	if cfg.Auth.IssuerURL == cfg.Auth.DiscoveryURL {
+		t.Error("IssuerURL and DiscoveryURL must stay independent settings")
+	}
 }
 
 func TestLoad_RejectsUserinfoInDatabaseHost(t *testing.T) {
@@ -83,6 +144,8 @@ func TestLoad_RejectsNonPositiveDurations(t *testing.T) {
 		"OUTBOX_BATCH_SIZE":          "0",
 		"OUTBOX_RETRY_BASE":          "0s",
 		"OUTBOX_RETRY_MAX":           "-1s",
+		"AUTH_CLOCK_SKEW":            "0s",
+		"AUTH_DISCOVERY_TIMEOUT":     "-1s",
 		"FX_STOP_TIMEOUT":            "0s",
 	}
 	for key, value := range cases {
@@ -151,5 +214,6 @@ func validEnv(t *testing.T) map[string]string {
 		"SQS_CONSUMER_SECRET_ACCESS_KEY":  "consumer-secret",
 		"SQS_PUBLISHER_ACCESS_KEY_ID":     "AKIAPUBLISHER",
 		"SQS_PUBLISHER_SECRET_ACCESS_KEY": "publisher-secret",
+		"AUTH_ISSUER_URL":                 "http://localhost:8081/realms/wallet",
 	}
 }
