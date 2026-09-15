@@ -36,6 +36,8 @@ package integration
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -471,6 +473,15 @@ func TestIAM_RedriveToDLQ(t *testing.T) {
 	}
 }
 
+// uniqueID returns a short, random, collision-free identifier - unlike a
+// timestamp-derived id, concurrent callers under go test -race never
+// collide (see newID's own crypto/rand approach in helpers_test.go, which
+// this mirrors; uniqueID keeps its own copy since it has no *testing.T to
+// call t.Helper()/t.Fatalf() with).
 func uniqueID(prefix string) string {
-	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		panic(fmt.Sprintf("generate id: %v", err))
+	}
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(buf[:]))
 }

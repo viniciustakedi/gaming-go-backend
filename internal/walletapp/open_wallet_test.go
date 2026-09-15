@@ -27,7 +27,7 @@ func TestOpenWalletUseCase_ZeroBalance_CreatesOnlyTheWallet(t *testing.T) {
 	transactions := &fakeTransactionRepository{}
 	ledger := &fakeLedgerRepository{}
 	outbox := &fakeOutboxRepository{}
-	uc := walletapp.NewOpenWalletUseCase(fakeUnitOfWork{wallets: wallets, transactions: transactions, ledger: ledger, outbox: outbox})
+	uc := walletapp.NewOpenWalletUseCase(&fakeUnitOfWork{wallets: wallets, transactions: transactions, ledger: ledger, outbox: outbox})
 
 	walletValue, err := uc.Open(context.Background(), walletapp.OpenWalletInput{
 		PlayerID: "player-1", InitialBalance: mustMoney(t, "0.00", money.BRL), CorrelationID: "corr-1",
@@ -64,7 +64,7 @@ func TestOpenWalletUseCase_PositiveBalance_RecordsOpeningLedgerAndOutbox(t *test
 	transactions := &fakeTransactionRepository{}
 	ledger := &fakeLedgerRepository{}
 	outbox := &fakeOutboxRepository{}
-	uc := walletapp.NewOpenWalletUseCase(fakeUnitOfWork{wallets: wallets, transactions: transactions, ledger: ledger, outbox: outbox})
+	uc := walletapp.NewOpenWalletUseCase(&fakeUnitOfWork{wallets: wallets, transactions: transactions, ledger: ledger, outbox: outbox})
 
 	walletValue, err := uc.Open(context.Background(), walletapp.OpenWalletInput{
 		PlayerID: "player-1", InitialBalance: mustMoney(t, "100.00", money.BRL), CorrelationID: "corr-1",
@@ -119,7 +119,7 @@ func TestOpenWalletUseCase_AlreadyExists_MapsToConflict(t *testing.T) {
 	t.Parallel()
 
 	wallets := &fakeWalletRepository{insertErr: walletapp.ErrAlreadyExists}
-	uc := walletapp.NewOpenWalletUseCase(fakeUnitOfWork{wallets: wallets, transactions: &fakeTransactionRepository{}, ledger: &fakeLedgerRepository{}, outbox: &fakeOutboxRepository{}})
+	uc := walletapp.NewOpenWalletUseCase(&fakeUnitOfWork{wallets: wallets, transactions: &fakeTransactionRepository{}, ledger: &fakeLedgerRepository{}, outbox: &fakeOutboxRepository{}})
 
 	_, err := uc.Open(context.Background(), walletapp.OpenWalletInput{PlayerID: "player-1", InitialBalance: mustMoney(t, "0.00", money.BRL)})
 	if !errors.Is(err, operation.ErrWalletAlreadyExists) {
@@ -132,7 +132,7 @@ func TestOpenWalletUseCase_UnexpectedWriteFailure_PropagatesUnclassified(t *test
 
 	boom := errors.New("connection reset")
 	wallets := &fakeWalletRepository{insertErr: boom}
-	uc := walletapp.NewOpenWalletUseCase(fakeUnitOfWork{wallets: wallets, transactions: &fakeTransactionRepository{}, ledger: &fakeLedgerRepository{}, outbox: &fakeOutboxRepository{}})
+	uc := walletapp.NewOpenWalletUseCase(&fakeUnitOfWork{wallets: wallets, transactions: &fakeTransactionRepository{}, ledger: &fakeLedgerRepository{}, outbox: &fakeOutboxRepository{}})
 
 	_, err := uc.Open(context.Background(), walletapp.OpenWalletInput{PlayerID: "player-1", InitialBalance: mustMoney(t, "0.00", money.BRL)})
 	if !errors.Is(err, boom) {
@@ -147,7 +147,7 @@ func TestOpenWalletUseCase_UnexpectedWriteFailure_PropagatesUnclassified(t *test
 func TestOpenWalletUseCase_InvalidMoney_MapsToInvalidMoney(t *testing.T) {
 	t.Parallel()
 
-	uc := walletapp.NewOpenWalletUseCase(fakeUnitOfWork{wallets: &fakeWalletRepository{}, transactions: &fakeTransactionRepository{}, ledger: &fakeLedgerRepository{}, outbox: &fakeOutboxRepository{}})
+	uc := walletapp.NewOpenWalletUseCase(&fakeUnitOfWork{wallets: &fakeWalletRepository{}, transactions: &fakeTransactionRepository{}, ledger: &fakeLedgerRepository{}, outbox: &fakeOutboxRepository{}})
 
 	_, err := uc.Open(context.Background(), walletapp.OpenWalletInput{PlayerID: "player-1", InitialBalance: money.Money{}})
 	if !errors.Is(err, operation.ErrInvalidMoney) {

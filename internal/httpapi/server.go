@@ -51,19 +51,21 @@ func (s *Server) Addr() string {
 	return s.Listener.Addr().String()
 }
 
-func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessChecks, logger *slog.Logger, verifier auth.Verifier, openWallet *walletapp.OpenWalletUseCase, getWallet *walletapp.GetWalletUseCase) (*Server, error) {
+func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessChecks, logger *slog.Logger, verifier auth.Verifier, openWallet *walletapp.OpenWalletUseCase, getWallet *walletapp.GetWalletUseCase, processOperation *walletapp.ProcessOperationUseCase) (*Server, error) {
 	readiness := NewReadiness(checks.Checks, cfg.HTTP.ReadinessTimeout)
 	latency := newHTTPLatency(registry)
 
-	// Every /wallets* route requires the wallet-admin realm role, checked by
-	// requireRole once the mux has matched a route. /health/* and /metrics
-	// stay unauthenticated (spec, decision 7).
+	// Every /wallets* route requires the wallet-admin realm role, and
+	// /wagering/transactions requires provider, both checked by requireRole
+	// once the mux has matched a route. /health/* and /metrics stay
+	// unauthenticated (spec, decision 7).
 	mux := http.NewServeMux()
 	mux.Handle("GET /health/live", liveHandler())
 	mux.Handle("GET /health/ready", readyHandler(readiness))
 	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{Registry: registry}))
 	mux.Handle("POST /wallets", latency.wrap("POST /wallets", requireRole(auth.RoleWalletAdmin, openWalletHandler(openWallet, logger))))
 	mux.Handle("GET /wallets/{walletId}", latency.wrap("GET /wallets/{walletId}", requireRole(auth.RoleWalletAdmin, getWalletHandler(getWallet, logger))))
+	mux.Handle("POST /wagering/transactions", latency.wrap("POST /wagering/transactions", requireRole(auth.RoleProvider, wageringTransactionsHandler(processOperation, logger))))
 
 	return &Server{
 		HTTP: &http.Server{

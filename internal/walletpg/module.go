@@ -28,13 +28,24 @@ func NewUnitOfWork(uow *pg.UnitOfWork) walletapp.UnitOfWork {
 
 func (u *unitOfWork) WithinTx(ctx context.Context, fn func(ctx context.Context, repos walletapp.Repositories) error) error {
 	return u.uow.Execute(ctx, func(ctx context.Context, q pg.Querier) error {
-		return fn(ctx, walletapp.Repositories{
-			Wallets:      newWalletRepository(q),
-			Transactions: newWagerTransactionRepository(q),
-			Ledger:       newLedgerRepository(q),
-			Outbox:       newOutboxRepository(q),
-		})
+		return fn(ctx, NewRepositories(q))
 	})
+}
+
+// NewRepositories builds the full walletapp.Repositories bundle bound to q,
+// the exact set unitOfWork.WithinTx binds to its own transaction above.
+// Exported so a caller that already holds its own transaction - ticket 13's
+// SQS inbox, and this ticket's own external-transaction test for
+// ProcessOperationUseCase.ExecuteInTx - can bind ExecuteInTx to it directly,
+// without going through WithinTx and opening a second transaction of its
+// own.
+func NewRepositories(q pg.Querier) walletapp.Repositories {
+	return walletapp.Repositories{
+		Wallets:      newWalletRepository(q),
+		Transactions: newWagerTransactionRepository(q),
+		Ledger:       newLedgerRepository(q),
+		Outbox:       newOutboxRepository(q),
+	}
 }
 
 // NewWalletReader builds the WalletRepository bound directly to the pool,
@@ -56,5 +67,6 @@ var Module = fx.Module("wallet",
 		NewWalletReader,
 		walletapp.NewOpenWalletUseCase,
 		walletapp.NewGetWalletUseCase,
+		walletapp.NewProcessOperationUseCase,
 	),
 )

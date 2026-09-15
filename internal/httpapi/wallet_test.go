@@ -40,10 +40,30 @@ func (f fakeWalletRepository) FindByID(ctx context.Context, id string) (*domainw
 	return nil, walletapp.ErrNotFound
 }
 
+func (f fakeWalletRepository) FindForUpdate(ctx context.Context, id string) (*domainwallet.Wallet, error) {
+	return nil, walletapp.ErrNotFound
+}
+
+func (f fakeWalletRepository) UpdateBalance(ctx context.Context, w *domainwallet.Wallet, previousVersion int64) error {
+	return nil
+}
+
 type fakeNoopTransactionRepository struct{}
 
 func (fakeNoopTransactionRepository) Insert(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error {
 	return nil
+}
+
+func (fakeNoopTransactionRepository) InsertNew(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) (bool, error) {
+	return true, nil
+}
+
+func (fakeNoopTransactionRepository) FindByIdempotencyKey(ctx context.Context, providerID, idempotencyKey string) (*walletapp.ExistingTransaction, error) {
+	return nil, walletapp.ErrNotFound
+}
+
+func (fakeNoopTransactionRepository) FindByExternalTransactionID(ctx context.Context, providerID, externalTransactionID string) (*walletapp.ExistingTransaction, error) {
+	return nil, walletapp.ErrNotFound
 }
 
 type fakeNoopLedgerRepository struct{}

@@ -116,6 +116,24 @@ func messageForCode(code operation.Code) string {
 		return "a wallet already exists for this player and currency"
 	case operation.CodeTemporarilyUnavailable:
 		return "the service is temporarily unavailable, retry with the same request"
+	case operation.CodeInvalidAmountForKind:
+		return "the amount is not allowed for this operation kind"
+	case operation.CodeKindNotAllowed:
+		return "this operation kind cannot be submitted by a provider"
+	case operation.CodeMissingIdempotencyKey:
+		return "the Idempotency-Key header is required"
+	case operation.CodeReferenceRequired:
+		return "this operation kind requires referenceExternalTransactionId"
+	case operation.CodeReferenceNotAllowed:
+		return "this operation kind must not carry a referenceExternalTransactionId"
+	case operation.CodeWalletPlayerMismatch:
+		return "the wallet belongs to a different player"
+	case operation.CodeWalletCurrencyMismatch:
+		return "the wallet is in a different currency"
+	case operation.CodeIdempotencyKeyReused:
+		return "this Idempotency-Key was already used with different content"
+	case operation.CodeExternalTransactionIDConflict:
+		return "this externalTransactionId was already used under a different Idempotency-Key"
 	default:
 		return "request rejected"
 	}
