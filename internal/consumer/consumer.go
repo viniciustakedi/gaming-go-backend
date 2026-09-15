@@ -44,15 +44,16 @@ type Consumer struct {
 	logger  *slog.Logger
 	metrics *metrics
 
-	mu         sync.Mutex
-	cancel     context.CancelFunc
-	workCancel context.CancelFunc
-	done       chan struct{}
-	active     map[string]types.Message
+	mu              sync.Mutex
+	cancel          context.CancelFunc
+	workCancel      context.CancelFunc
+	done            chan struct{}
+	active          map[string]types.Message
+	postCancelDrain time.Duration
 }
 
 func New(queues *queue.Queues, pool *pgxpool.Pool, useCase *walletapp.ProcessOperationUseCase, cfg config.Config, logger *slog.Logger, registry *prometheus.Registry) *Consumer {
-	return &Consumer{queues: queues, pool: pool, useCase: useCase, cfg: cfg.SQS.Consumer, logger: logger, metrics: newMetrics(registry), active: make(map[string]types.Message)}
+	return &Consumer{queues: queues, pool: pool, useCase: useCase, cfg: cfg.SQS.Consumer, logger: logger, metrics: newMetrics(registry), active: make(map[string]types.Message), postCancelDrain: config.SQSConsumerPostCancelDrain}
 }
 
 func RegisterLifecycle(lc fx.Lifecycle, consumer *Consumer) {
@@ -94,19 +95,19 @@ func (c *Consumer) stop(ctx context.Context) error {
 		return nil
 	case <-wait.Done():
 		workCancel()
+		// One post-cancellation window covers both releasing active messages and
+		// waiting for workers to finish. The active lock held by releaseActive
+		// keeps a worker from untracking before its visibility is reset.
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), c.drainTimeout())
+		defer cancelDrain()
 		// Hold active's lock while releasing: workers cannot untrack an entry
 		// until its visibility has been reset, so shutdown never races a final
 		// untrack against the handoff back to SQS.
-		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), config.SQSConsumerPostCancelDrain)
-		c.releaseActive(releaseCtx)
-		cancelRelease()
+		c.releaseActive(drainCtx)
 		// The Fx context can expire at exactly the moment work is cancelled.
-		// Keep the dependency barrier for the configured post-cancellation
-		// drain nevertheless: config validates that this bounded interval fits
-		// in FX_STOP_TIMEOUT during normal shutdown, and returning before done
+		// Keep the dependency barrier until this same bounded drain window ends:
+		// config validates it fits in FX_STOP_TIMEOUT, and returning before done
 		// would let Fx close pgx or SQS under a worker still unwinding.
-		drainCtx, cancelDrain := context.WithTimeout(context.Background(), config.SQSConsumerPostCancelDrain)
-		defer cancelDrain()
 		select {
 		case <-done:
 			return fmt.Errorf("consumer: stop: %w", wait.Err())
@@ -114,6 +115,13 @@ func (c *Consumer) stop(ctx context.Context) error {
 			return fmt.Errorf("consumer: stop: cancelled workers: %w", drainCtx.Err())
 		}
 	}
+}
+
+func (c *Consumer) drainTimeout() time.Duration {
+	if c.postCancelDrain > 0 {
+		return c.postCancelDrain
+	}
+	return config.SQSConsumerPostCancelDrain
 }
 
 func (c *Consumer) run(receiveCtx, workCtx context.Context) {
