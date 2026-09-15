@@ -141,6 +141,23 @@ func TestProcessOperationUseCase_Bet_DebitsAndRecordsLedgerAndOutbox(t *testing.
 	}
 }
 
+func TestProcessOperationUseCase_RecordOutcome_RecordsSQSReplay(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "100.00", 1))
+
+	h.useCase.RecordOutcome(walletapp.ChannelSQS, walletapp.ProcessOperationResult{
+		Status:           domainwallet.Processed,
+		IdempotentReplay: true,
+	}, nil, 2*time.Second)
+
+	if len(h.metrics.operations) != 1 || h.metrics.operations[0].channel != walletapp.ChannelSQS || h.metrics.operations[0].kind != "" || h.metrics.operations[0].status != "PROCESSED" || h.metrics.operations[0].duration != 2*time.Second {
+		t.Errorf("operations = %+v, want one SQS/empty-kind/PROCESSED observation lasting 2s", h.metrics.operations)
+	}
+	if len(h.metrics.duplicates) != 1 || h.metrics.duplicates[0] != walletapp.ChannelSQS {
+		t.Errorf("duplicates = %+v, want one SQS replay", h.metrics.duplicates)
+	}
+}
+
 func TestProcessOperationUseCase_Win_CreditsWallet(t *testing.T) {
 	t.Parallel()
 	h := newProcessHarness(testWallet(t, "50.00", 1))

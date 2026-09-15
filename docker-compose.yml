@@ -68,6 +68,13 @@ x-app-environment: &app-environment
   # from the file provisioning wrote, since they only exist after that
   # container has run.
 
+# The multi-instance profile proves HTTP transaction concurrency. Keeping its
+# three processes out of the SQS input queue makes the scenario independent
+# from the consumer and avoids competing with the normal single app service.
+x-multi-app-environment: &multi-app-environment
+  <<: *app-environment
+  SQS_CONSUMER_ENABLED: "false"
+
 # Only the app's own files are mounted - never a whole .runtime directory -
 # so a wallet-service container has no path to gateway, events-reader, IAM
 # test fixture keys or the Postgres owner's own credentials, only its own
@@ -182,7 +189,8 @@ services:
 
   # One-shot: creates the queues, the DLQ redrive, the four least-privilege
   # IAM users (gateway, consumer, publisher, events-reader) and the IAM test
-  # fixtures (deny-probe, redrive-tester - see provision.sh), then writes
+  # fixtures (deny-probe, redrive-tester, dlq-reader, consumer-fixture - see
+  # provision.sh), then writes
   # two credential files under deploy/ministack/.runtime - bind-mounted, not
   # a named volume, so `go test -tags integration ./...` run straight from
   # the host can read the test one. It is the only service in this whole
@@ -278,7 +286,7 @@ services:
     profiles: ["multi"]
     ports:
       - "${HTTP_PORT_1:-8091}:8080"
-    environment: *app-environment
+    environment: *multi-app-environment
     volumes: *app-volumes
     depends_on: *app-depends-on
 
@@ -287,7 +295,7 @@ services:
     profiles: ["multi"]
     ports:
       - "${HTTP_PORT_2:-8092}:8080"
-    environment: *app-environment
+    environment: *multi-app-environment
     volumes: *app-volumes
     depends_on: *app-depends-on
 
@@ -296,6 +304,6 @@ services:
     profiles: ["multi"]
     ports:
       - "${HTTP_PORT_3:-8093}:8080"
-    environment: *app-environment
+    environment: *multi-app-environment
     volumes: *app-volumes
     depends_on: *app-depends-on

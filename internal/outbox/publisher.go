@@ -7,13 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/fx"
 
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/backoff"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/config"
 )
 
@@ -156,7 +156,7 @@ func (p *Publisher) publish(ctx context.Context, record Record) error {
 var errInvalidWalletID = errors.New("payload data.walletId is empty")
 
 func (p *Publisher) retry(ctx context.Context, record Record, sendErr error) error {
-	delay := backoff(p.cfg.RetryBase, p.cfg.RetryMax, record.Attempts)
+	delay := backoff.Exponential(record.Attempts, p.cfg.RetryBase, p.cfg.RetryMax)
 	if err := p.store.ScheduleRetry(ctx, record.EventID, delay, sendErr.Error()); err != nil {
 		p.recordStoreError("schedule_retry", record.EventID, err)
 		return fmt.Errorf("outbox: schedule retry for event %s: %w", record.EventID, err)
@@ -170,18 +170,6 @@ func (p *Publisher) retry(ctx context.Context, record Record, sendErr error) err
 func (p *Publisher) recordStoreError(operation, eventID string, err error) {
 	p.metrics.storeErrors.WithLabelValues(operation).Inc()
 	p.logger.Error("outbox store operation failed", "operation", operation, "eventId", eventID, "error", err)
-}
-
-func backoff(base, max time.Duration, previousAttempts int) time.Duration {
-	if previousAttempts <= 0 {
-		return base
-	}
-	factor := math.Pow(2, float64(previousAttempts))
-	delay := time.Duration(float64(base) * factor)
-	if delay < 0 || delay > max {
-		return max
-	}
-	return delay
 }
 
 func (p *Publisher) refreshMetrics(ctx context.Context) {

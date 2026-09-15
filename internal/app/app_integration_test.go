@@ -165,6 +165,7 @@ func setIntegrationEnv(t *testing.T) {
 	}
 	for _, kv := range []struct{ key, fallback string }{
 		{"SQS_ENDPOINT_URL", "http://localhost:4566"},
+		{"SQS_CONSUMER_POLL_WAIT", "1s"},
 		{"AUTH_ISSUER_URL", "http://localhost:" + keycloakPort() + "/realms/wallet"},
 	} {
 		if os.Getenv(kv.key) == "" {

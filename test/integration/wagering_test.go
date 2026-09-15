@@ -5,7 +5,10 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -84,6 +87,23 @@ func wageringDuplicateAttemptsMetric(t *testing.T, h *appHarness, channel string
 		t.Fatalf("GET /metrics status = %d, want 200", resp.StatusCode)
 	}
 	return testclient.DuplicateAttemptsMetric(t, body, channel)
+}
+
+func wageringOperationsMetric(t *testing.T, h *appHarness, channel, kind, status string) float64 {
+	t.Helper()
+	resp, body := h.do(t, http.MethodGet, "/metrics", nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d, want 200", resp.StatusCode)
+	}
+	prefix := fmt.Sprintf(`wagering_operations_total{channel="%s",kind="%s",status="%s"} `, channel, kind, status)
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			value, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, prefix)), 64)
+			requireNoError(t, err, "parse wagering_operations_total value")
+			return value
+		}
+	}
+	return 0
 }
 
 func queryWagerTransaction(t *testing.T, ctx context.Context, h *appHarness, id string) (status, failureCode string, resultingBalance *int64, found bool) {
