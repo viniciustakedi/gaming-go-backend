@@ -29,6 +29,7 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/money"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/operation"
 	domainwallet "github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/wallet"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/faultinject"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/queue"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletapp"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletpg"
@@ -229,8 +230,24 @@ func (c *Consumer) handle(parent context.Context, message types.Message) {
 		c.metrics.duplicates.Inc()
 	} else {
 		c.useCase.RecordOutcome(walletapp.ChannelSQS, result, nil, time.Since(started))
+		// The "after commit of PENDING_REFERENCE" fault point (spec, "Injeção
+		// de falhas e ambiente") fires only for a freshly committed pending
+		// row, not a replay of one already persisted: processOnce's
+		// transaction already committed by the time process returns here, so
+		// this is genuinely post-commit, not a substitute for a trigger
+		// placed before it. An idempotent replay's own transaction only ever
+		// commits the inbox row, never a new PENDING_REFERENCE, exactly like
+		// the HTTP path (walletapp.Process) already guards.
+		if result.Status == domainwallet.PendingReference && !result.IdempotentReplay {
+			faultinject.Trigger("after-pending-reference-commit")
+		}
 	}
 	fields.transactionID = result.TransactionID
+	// The "after commit and before DeleteMessage" fault point (spec, "Injeção
+	// de falhas e ambiente") fires here: the inbox row and the wallet effect
+	// (or the duplicate's own commit) are already durable, only the SQS
+	// delete is still pending.
+	faultinject.Trigger("after-commit-before-delete")
 	if err := c.delete(parent, message); err != nil {
 		c.logger.Error("sqs delete after commit failed", "error", err, "messageId", fields.messageID, "transactionId", fields.transactionID, "walletId", fields.walletID, "providerId", fields.providerID)
 		return
@@ -270,6 +287,12 @@ func (c *Consumer) processOnce(ctx context.Context, messageID string, prepared w
 		if hash != prepared.Hash() {
 			return walletapp.ProcessOperationResult{}, false, false, errInboxHashMismatch
 		}
+		// The "before commit" fault point (spec, "Injeção de falhas e
+		// ambiente") fires here too: a duplicate delivery commits nothing new
+		// besides the already-matching inbox row, but it is still a commit a
+		// crash can interrupt, leaving the redelivery to reprocess exactly
+		// once more.
+		faultinject.Trigger("before-commit")
 		if err := tx.Commit(ctx); err != nil {
 			return walletapp.ProcessOperationResult{}, false, false, err
 		}
@@ -285,6 +308,11 @@ func (c *Consumer) processOnce(ctx context.Context, messageID string, prepared w
 	if _, err := tx.Exec(ctx, `UPDATE inbox_messages SET completed_at = now() WHERE consumer_name = $1 AND message_id = $2`, consumerName, messageID); err != nil {
 		return walletapp.ProcessOperationResult{}, false, false, err
 	}
+	// The "before commit" fault point (spec, "Injeção de falhas e ambiente"):
+	// killing the process here leaves the whole transaction - inbox insert
+	// and wallet effect alike - rolled back by Postgres when the connection
+	// drops, so redelivery finds nothing persisted and processes once.
+	faultinject.Trigger("before-commit")
 	if err := tx.Commit(ctx); err != nil {
 		return walletapp.ProcessOperationResult{}, false, false, err
 	}

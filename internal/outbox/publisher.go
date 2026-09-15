@@ -15,6 +15,7 @@ import (
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/backoff"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/config"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/faultinject"
 )
 
 // Record is the immutable event snapshot and its delivery state returned by a claimed outbox row.
@@ -141,13 +142,26 @@ func (p *Publisher) publish(ctx context.Context, record Record) error {
 		}
 		return p.retry(ctx, record, fmt.Errorf("outbox: invalid committed payload: %w", err))
 	}
+	// The "after claim, before send" fault point (spec, "Injeção de falhas e
+	// ambiente"): record.EventID is already claimed (its lease pushed out by
+	// PublishBatch's Claim), so killing the process here just lets the lease
+	// expire and another instance's publisher claim and send it.
+	faultinject.Trigger("after-outbox-claim-before-send")
 	if err := p.queue.Send(ctx, record.Payload, envelope.Data.WalletID, record.EventID); err != nil {
 		return p.retry(ctx, record, fmt.Errorf("outbox: send event %s: %w", record.EventID, err))
 	}
+	// The "after send, before confirmation" fault point (spec, "Injeção de
+	// falhas e ambiente"): the event already reached SQS under this eventId,
+	// so killing the process here leaves publishedAt unset; another instance
+	// republishes the same eventId once the lease expires, and the FIFO
+	// deduplication window (or the reader's own dedup by eventId once it has
+	// passed) keeps the confirmed delivery from ever being lost or doubled.
+	faultinject.Trigger("after-outbox-send-before-confirm")
 	if err := p.store.MarkPublished(ctx, record.EventID); err != nil {
 		p.recordStoreError("mark_published", record.EventID, err)
 		return fmt.Errorf("outbox: confirm event %s: %w", record.EventID, err)
 	}
+	p.metrics.published.Inc()
 	p.logger.Info("outbox event published", "eventId", record.EventID)
 	p.refreshMetrics(ctx)
 	return nil
@@ -189,6 +203,7 @@ func (p *Publisher) refreshMetrics(ctx context.Context) {
 type publisherMetrics struct {
 	pending     prometheus.Gauge
 	oldestAge   prometheus.Gauge
+	published   prometheus.Counter
 	retries     prometheus.Counter
 	storeErrors *prometheus.CounterVec
 }
@@ -197,10 +212,11 @@ func newPublisherMetrics(registry *prometheus.Registry) *publisherMetrics {
 	m := &publisherMetrics{
 		pending:     prometheus.NewGauge(prometheus.GaugeOpts{Name: "outbox_pending_events", Help: "Outbox events not confirmed as published."}),
 		oldestAge:   prometheus.NewGauge(prometheus.GaugeOpts{Name: "outbox_oldest_unpublished_age_seconds", Help: "Age of the oldest unconfirmed outbox event."}),
+		published:   prometheus.NewCounter(prometheus.CounterOpts{Name: "outbox_published_total", Help: "Outbox events this instance's own publisher confirmed as published."}),
 		retries:     prometheus.NewCounter(prometheus.CounterOpts{Name: "outbox_retries_total", Help: "Outbox event send failures scheduled for retry."}),
 		storeErrors: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "outbox_store_errors_total", Help: "Outbox store operation failures."}, []string{"operation"}),
 	}
-	registry.MustRegister(m.pending, m.oldestAge, m.retries, m.storeErrors)
+	registry.MustRegister(m.pending, m.oldestAge, m.published, m.retries, m.storeErrors)
 	return m
 }
 

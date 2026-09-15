@@ -9,6 +9,7 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/money"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/operation"
 	domainwallet "github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/wallet"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/faultinject"
 )
 
 // Channel labels the transport an operation arrived on, for metrics and
@@ -253,6 +254,15 @@ func (uc *ProcessOperationUseCase) Process(ctx context.Context, input ProcessOpe
 	result, err := uc.processWithRetry(ctx, prepared)
 	if err != nil {
 		return ProcessOperationResult{}, err
+	}
+
+	// The "after commit of PENDING_REFERENCE" fault point (spec, "Injeção de
+	// falhas e ambiente") fires only for a freshly committed pending row, not
+	// a replay of one already persisted: processWithRetry's transaction has
+	// already committed by the time control returns here, so this is
+	// genuinely post-commit, not a substitute for a trigger placed before it.
+	if result.Status == domainwallet.PendingReference && !result.IdempotentReplay {
+		faultinject.Trigger("after-pending-reference-commit")
 	}
 
 	uc.RecordOutcome(input.Channel, result, nil, uc.now().Sub(started))
