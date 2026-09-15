@@ -26,9 +26,10 @@ import (
 // endpoint should extend this harness and its do() client rather than
 // build its own ad hoc fxtest wiring.
 type appHarness struct {
-	baseURL string
-	client  *http.Client
-	pool    *pgxpool.Pool
+	baseURL    string
+	client     *http.Client
+	pool       *pgxpool.Pool
+	adminToken string
 }
 
 // newAppHarness starts one fx.App per call, on its own free port, and
@@ -36,6 +37,12 @@ type appHarness struct {
 // setting the pool reads only at connect time (DATABASE_LOCK_TIMEOUT, for
 // the transient-failure scenario) must t.Setenv it before calling this,
 // since every harness gets its own pool.
+//
+// It also fetches a real wallet-admin token from Keycloak up front: every
+// ticket-06 wallet test in this package predates ticket 07's auth
+// requirement and calls do() without ever mentioning a token, so do() below
+// applies this one by default unless a call explicitly sets (or blanks out)
+// its own Authorization header - see do()'s doc comment.
 func newAppHarness(t *testing.T) *appHarness {
 	t.Helper()
 	setAppEnv(t)
@@ -47,9 +54,10 @@ func newAppHarness(t *testing.T) *appHarness {
 	t.Cleanup(fxApp.RequireStop)
 
 	return &appHarness{
-		baseURL: "http://" + server.Addr(),
-		client:  &http.Client{Timeout: 10 * time.Second},
-		pool:    pool,
+		baseURL:    "http://" + server.Addr(),
+		client:     &http.Client{Timeout: 10 * time.Second},
+		pool:       pool,
+		adminToken: fetchToken(t, walletServiceClient()),
 	}
 }
 
@@ -57,6 +65,14 @@ func newAppHarness(t *testing.T) *appHarness {
 // response with its body already read, so callers never have to remember
 // the drain-and-close dance themselves. body may be nil for a bodyless
 // request.
+//
+// Every request carries h.adminToken as "Authorization: Bearer <token>" by
+// default, since every /wallets* route now requires wallet-admin (ticket
+// 07). A caller proving a specific auth scenario overrides this the same
+// way it overrides any other header: pass "Authorization" in headers - an
+// empty value removes the header entirely (the "missing token" scenario), a
+// non-empty one replaces it (a different role's token, a tampered token, an
+// expired one).
 func (h *appHarness) do(t *testing.T, method, path string, headers map[string]string, body []byte) (*http.Response, []byte) {
 	t.Helper()
 
@@ -67,7 +83,12 @@ func (h *appHarness) do(t *testing.T, method, path string, headers map[string]st
 	req, err := http.NewRequest(method, h.baseURL+path, reader)
 	requireNoError(t, err, "build request "+method+" "+path)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.adminToken)
 	for k, v := range headers {
+		if k == "Authorization" && v == "" {
+			req.Header.Del("Authorization")
+			continue
+		}
 		req.Header.Set(k, v)
 	}
 
@@ -91,6 +112,8 @@ func setAppEnv(t *testing.T) {
 		t.Setenv(k, v)
 	}
 	setEnvIfUnset(t, "SQS_ENDPOINT_URL", "http://localhost:4566")
+	setEnvIfUnset(t, "AUTH_ISSUER_URL", keycloakIssuerURL())
+	setEnvIfUnset(t, "AUTH_AUDIENCE", authAudience())
 	t.Setenv("HTTP_ADDR", "127.0.0.1:0")
 	t.Setenv("DATABASE_APP_CREDENTIALS_FILE", filepath.Join("..", "..", "deploy", "postgres", ".runtime", "credentials.env"))
 

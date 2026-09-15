@@ -6,6 +6,7 @@ package app
 import (
 	"go.uber.org/fx"
 
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/auth"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/config"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/httpapi"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/logging"
@@ -25,6 +26,7 @@ var Modules = fx.Options(
 	metrics.Module,
 	pg.Module,
 	queue.Module,
+	auth.Module,
 	walletpg.Module,
 	httpapi.Module,
 )

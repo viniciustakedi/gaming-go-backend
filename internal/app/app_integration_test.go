@@ -11,8 +11,10 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,18 +104,68 @@ func TestApp_StartFailsWithInvalidConfig(t *testing.T) {
 	}
 }
 
+const defaultOwnerDSN = "postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable"
+
+// databaseConfigEnv derives config.Load's credential-free DATABASE_HOST/
+// DATABASE_PORT/DATABASE_NAME/DATABASE_SSLMODE from DATABASE_URL's own
+// host, port, database and sslmode - the same derivation
+// test/integration's appConfigEnv uses - so a non-default Postgres port
+// (set once, in DATABASE_URL, for a whole `docker compose -p <prefix>`
+// stack) does not also require separately exported DATABASE_HOST/PORT.
+func databaseConfigEnv(t *testing.T) map[string]string {
+	t.Helper()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = defaultOwnerDSN
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse DATABASE_URL: %v", err)
+	}
+	port := u.Port()
+	if port == "" {
+		port = "5432"
+	}
+	sslmode := u.Query().Get("sslmode")
+	if sslmode == "" {
+		sslmode = "disable"
+	}
+	return map[string]string{
+		"DATABASE_HOST":    u.Hostname(),
+		"DATABASE_PORT":    port,
+		"DATABASE_NAME":    strings.TrimPrefix(u.Path, "/"),
+		"DATABASE_SSLMODE": sslmode,
+	}
+}
+
+// keycloakPort mirrors test/integration's own KEYCLOAK_PORT convention
+// (see test/integration/keycloak_test.go), so this package's OIDC
+// discovery in TestApp_StartStop_ReleasesResources reaches the same
+// Keycloak a manual `scripts/wait-for-integration.sh` run brought up.
+func keycloakPort() string {
+	if v := os.Getenv("KEYCLOAK_PORT"); v != "" {
+		return v
+	}
+	return "8081"
+}
+
 func setIntegrationEnv(t *testing.T) {
 	t.Helper()
+	// Credential-free on purpose - config.Load rejects userinfo here, the
+	// same shape docker-compose.yml's app service receives. The migration
+	// owner's own DATABASE_URL (with credentials) is never read by this
+	// process, only by `wallet-service migrate`. Host/port/name/sslmode are
+	// derived from DATABASE_URL when set (the same override
+	// test/integration's own appConfigEnv uses for a non-default Postgres
+	// port), so this test needs no separate DATABASE_HOST/PORT of its own.
+	for k, v := range databaseConfigEnv(t) {
+		if os.Getenv(k) == "" {
+			t.Setenv(k, v)
+		}
+	}
 	for _, kv := range []struct{ key, fallback string }{
-		// Credential-free on purpose - config.Load rejects userinfo here,
-		// the same shape docker-compose.yml's app service receives. The
-		// migration owner's own DATABASE_URL (with credentials) is never
-		// read by this process, only by `wallet-service migrate`.
-		{"DATABASE_HOST", "localhost"},
-		{"DATABASE_PORT", "5432"},
-		{"DATABASE_NAME", "wallet"},
-		{"DATABASE_SSLMODE", "disable"},
 		{"SQS_ENDPOINT_URL", "http://localhost:4566"},
+		{"AUTH_ISSUER_URL", "http://localhost:" + keycloakPort() + "/realms/wallet"},
 	} {
 		if os.Getenv(kv.key) == "" {
 			t.Setenv(kv.key, kv.fallback)

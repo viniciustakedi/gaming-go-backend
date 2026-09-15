@@ -17,14 +17,18 @@ docker compose up --build
 ```
 
 Isso sobe, nesta ordem: `postgres` (com healthcheck, publicado só em
-`127.0.0.1`), `ministack` (com `AUTH=true`), `provisioning` (one-shot: cria
+`127.0.0.1`), `ministack` (com `AUTH=true`), `keycloak` (também publicado só
+em `127.0.0.1`, sem administrador - realm `wallet` importado automaticamente
+do arquivo `deploy/keycloak/realm-wallet.json` - ver "Autenticação e
+autorização" abaixo), `provisioning` (one-shot: cria
 as filas, o redrive para a DLQ, os quatro usuários IAM de menor privilégio e
 os fixtures de teste de IAM - ver "Fixtures de teste de IAM" abaixo),
 `postgres-provisioning` (one-shot: cria o papel `wallet_app`, se ainda não
 existir, e define sua senha - ver "Credenciais do Postgres" abaixo),
 `migrate` (one-shot: aplica as migrations - só depois que o papel já
-existe) e por fim `app`, que só inicia depois que Postgres está saudável e
-os one-shots de IAM/Postgres/migrations terminaram com sucesso.
+existe) e por fim `app`, que só inicia depois que Postgres está saudável, o
+container do Keycloak já foi iniciado (não necessariamente pronto - ver
+abaixo) e os one-shots de IAM/Postgres/migrations terminaram com sucesso.
 
 `provisioning` e `postgres-provisioning` são idempotentes: rodar `docker
 compose up --build` de novo contra o mesmo MiniStack/Postgres reaproveita
@@ -133,8 +137,9 @@ nunca mostra a senha do dono, porque ela nunca chega a esse container.
 - `GET /wallets/{walletId}` - `200` com `id`, `playerId`, `balance` e
   `version`, ou `404` se a carteira não existe.
 
-Sem autenticação por enquanto (ticket 07 protege `/wallets*` com o papel
-`wallet-admin`) - não expor esses endpoints fora do ambiente local.
+Toda chamada exige `Authorization: Bearer <token>` com o papel
+`wallet-admin`; ver "Autenticação e autorização" abaixo. `/health/*` e
+`/metrics` continuam públicos.
 
 ### Fixtures de teste de IAM
 
@@ -158,6 +163,127 @@ como o único lugar autorizado a usar a chave root:
 
 Nenhum desses usuários, filas ou chaves participa do Compose da aplicação;
 eles existem só para o `test/integration` rodar sem tocar na chave root.
+
+## Autenticação e autorização
+
+Toda rota de negócio (hoje `/wallets*`; o desenho acomoda `/wagering*` e
+`/providers*` sem mudança estrutural) exige um token OAuth 2.0 emitido por um
+Keycloak real via `client_credentials`. A autenticação roda antes do próprio
+roteamento (`internal/httpapi/server.go`'s `authenticate`, que envolve o mux
+inteiro): qualquer caminho ou método de negócio sem token válido devolve
+`401`, mesmo um método que nenhuma rota mapeia (por exemplo `PUT /wallets`) -
+nunca o `405` público que o mux devolveria por conta própria. Com token
+válido, um método não mapeado ainda devolve `405`, e o papel errado devolve
+`403`. `/health/*` e `/metrics` continuam públicos.
+
+**Keycloak não tem administrador.** Nem `KC_BOOTSTRAP_ADMIN_*` nem o legado
+`KEYCLOAK_ADMIN`/`KEYCLOAK_ADMIN_PASSWORD` são definidos - o container sobe
+sem nenhuma conta no realm `master`. Nada neste repositório precisa da API
+admin: todo client, papel, mapper e claim do realm `wallet` vem declarado
+estaticamente em `deploy/keycloak/realm-wallet.json` e é criado pelo próprio
+`--import-realm`, incluindo o `access.token.lifespan` de 2s de
+`provider-a-short-lived` (um atributo estático do client, não uma chamada à
+API admin). A porta do Keycloak (`KEYCLOAK_PORT`, 8081 por padrão) é
+publicada só em `127.0.0.1`, pelo mesmo motivo do Postgres acima: um Console
+Admin alcançável, mesmo sem credencial nenhuma configurada, é superfície de
+ataque que este projeto não precisa expor.
+
+O realm `wallet` é importado automaticamente no boot do Keycloak, a partir
+de `deploy/keycloak/realm-wallet.json` (`start-dev --import-realm`) - sem
+provisionamento em separado, ao contrário do MiniStack e do Postgres acima.
+Ele define:
+
+- `provider-a` e `provider-b` - papel `provider`, claim fixo `provider_id`
+  (`provider-a`/`provider-b` respectivamente) por um protocol mapper
+  hardcoded.
+- `wallet-service` - papel `wallet-admin`, o único que passa em `/wallets*`.
+- `no-roles-client` - nenhum papel, para os testes de `403`.
+- `provider-a-short-lived` - igual a `provider-a`, mas com
+  `access.token.lifespan` de 2 segundos, para o teste de token expirado.
+- Um client scope `wallet-api-audience`, com um audience mapper que coloca
+  `wallet-api` no `aud` de todo token - a audiência que `internal/config`
+  valida por padrão (`AUTH_AUDIENCE`).
+- Um client scope `wallet-realm-roles`, com o mapper padrão de papéis de
+  realm (`realm_access.roles`) - definido explicitamente porque um realm
+  importado do zero via `--import-realm` não herda os client scopes
+  embutidos (`roles`, `profile`, `web-origins`, `acr`) que um realm criado
+  pelo Admin Console ganharia automaticamente.
+
+Nenhum desses `client_secret` é um segredo real - são fixtures de um realm
+de desenvolvimento reimportado a cada `docker compose up`, documentados em
+`.env.example` (`AUTH_TEST_*`).
+
+### Validação
+
+`internal/auth` (`internal/auth/verifier.go`) descobre a configuração OIDC
+do Keycloak (`issuer`, `jwks_uri`) no `OnStart` da aplicação, com retry e
+backoff fixo limitado a `AUTH_DISCOVERY_TIMEOUT` (45s por padrão - o boot do
+Keycloak, incluindo a importação do realm, costuma ser o mais lento entre
+todas as dependências deste processo). O verificador resultante
+(`coreos/go-oidc` v3) confere assinatura RS256 via JWKS com cache
+(`RemoteKeySet`), `issuer` e `aud`. Expiração (`exp`), validade futura
+(`nbf`) e emissão futura (`iat`) são conferidas pelo próprio
+`internal/auth`, não pelo go-oidc: a checagem embutida do go-oidc aplica 5
+minutos fixos de tolerância a `nbf` (para interoperar com provedores fora do
+spec), o que aceitaria um token com `nbf` até 5 minutos no futuro mesmo com
+`AUTH_CLOCK_SKEW` configurado bem menor - por isso o verificador desliga essa
+checagem (`SkipExpiryCheck: true`) e aplica a própria, com um relógio
+injetável para teste, contra a tolerância configurada (`AUTH_CLOCK_SKEW`, 5s
+por padrão). Um token sem `exp` é sempre rejeitado; `nbf` e `iat` só são
+checados quando presentes.
+
+Duas variáveis distintas controlam onde a descoberta acontece e o que o
+token precisa provar:
+
+- `AUTH_ISSUER_URL` é o `iss` exato que todo token aceito precisa carregar -
+  o endereço público do Keycloak (o mesmo que `KC_HOSTNAME`, abaixo, fixa),
+  idêntico para qualquer chamador, dentro ou fora do Compose.
+- `AUTH_DISCOVERY_URL` é só de onde este processo busca a configuração
+  OIDC/JWKS - nunca comparado contra o `iss` de um token. No Compose, o
+  container `app` não alcança o endereço público do Keycloak, só
+  `http://keycloak:8080` pela rede interna; no host (`go test`,
+  `test/integration`), as duas variáveis coincidem, e `AUTH_DISCOVERY_URL`
+  pode ficar de fora (tem `AUTH_ISSUER_URL` como padrão).
+
+A separação usa o mecanismo do próprio go-oidc para descobrir num host
+diferente do issuer (`oidc.InsecureIssuerURLContext`) sem afrouxar a
+validação do `iss` do token - ver o comentário de `discoverWithRetry` em
+`internal/auth/verifier.go`.
+
+Os papéis e o `provider_id` do token viram um `auth.Identity` no contexto da
+requisição (`internal/httpapi/auth_middleware.go`'s `authenticate`), antes
+de qualquer roteamento acontecer - ordem autenticação → autorização →
+validação → efeito. Um provedor sem `provider_id` no token é tratado como
+`403`, não `401`: o token é genuíno, só a identidade que ele carrega está
+incompleta.
+
+### Fluxo para chamar a API
+
+```sh
+TOKEN=$(curl -s -X POST http://localhost:${KEYCLOAK_PORT:-8081}/realms/wallet/protocol/openid-connect/token \
+  -d grant_type=client_credentials \
+  -d client_id=wallet-service \
+  -d client_secret=wallet-service-secret \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+curl -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"playerId":"<uuid>","initialBalance":{"amount":"10.00","currency":"BRL"}}' \
+  http://localhost:${HTTP_PORT:-8080}/wallets
+```
+
+Isso funciona sem nenhum passo extra: `KC_HOSTNAME` fixa o `iss` de todo
+token em `http://localhost:${KEYCLOAK_PORT:-8081}/realms/wallet`, o mesmo
+endereço que `AUTH_ISSUER_URL` do container `app` valida contra - o mesmo
+token buscado do host acima é o que a chamada a `app` (rodando no Compose)
+aceita, direto, `201`. `KC_HOSTNAME_BACKCHANNEL_DYNAMIC` é o que permite essa
+mesma consistência sem impedir o container `app` de alcançar Keycloak pelo
+nome do serviço (`AUTH_DISCOVERY_URL=http://keycloak:8080/realms/wallet`,
+ver "Validação" acima) - ver `docker-compose.yml`'s serviço `keycloak`.
+
+Logs (`log/slog`) nunca registram o header `Authorization` nem o token em
+si - `internal/httpapi`'s auth middleware só registra o resultado
+(autenticado/negado), nunca a credencial.
 
 ## Migrations
 
@@ -187,12 +313,16 @@ Testes de integração (tag `integration`) precisam da infraestrutura no ar.
 `postgres-provisioning`, `migrate`) terminarem - ele volta assim que os
 containers começam a rodar, e ler os arquivos de credenciais nesse instante
 pode pegar um arquivo de uma subida anterior ou ainda incompleto.
-`scripts/wait-for-integration.sh` resolve isso: sobe `postgres` e `ministack`
-com `docker compose up -d --wait` (aguardando os dois saudáveis) e roda cada
-one-shot com `docker compose run --rm` em sequência - o que bloqueia até cada
-um terminar e aborta o script (`set -euo pipefail`) no primeiro que sair com
-código diferente de zero. O script não imprime nada em stdout e não lê nem
-exporta nenhuma credencial - é só uma sequência de comandos do Compose:
+`scripts/wait-for-integration.sh` resolve isso: sobe `postgres`, `ministack`
+e `keycloak` com `docker compose up -d --wait` (aguardando os dois primeiros
+saudáveis - `keycloak` não tem healthcheck, ver "Autenticação e
+autorização"), roda `keycloak-wait` (one-shot que faz polling do endpoint de
+descoberta OIDC até responder `200`, provando que o realm já foi importado)
+e roda cada one-shot restante com `docker compose run --rm` em sequência - o
+que bloqueia até cada um terminar e aborta o script (`set -euo pipefail`) no
+primeiro que sair com código diferente de zero. O script não imprime nada em
+stdout e não lê nem exporta nenhuma credencial - é só uma sequência de
+comandos do Compose:
 
 ```sh
 scripts/wait-for-integration.sh && go test -race -tags integration -count=1 ./...
@@ -219,6 +349,14 @@ existir, o teste falha pedindo para rodar `scripts/wait-for-integration.sh`.
   falha nunca chega a abrir o listener HTTP, e a porta continua livre para
   uma nova tentativa - reproduzido com um `fxtest.Lifecycle` isolado, sem
   precisar de Postgres nem MiniStack reais.
+- `internal/auth`: o verificador OIDC contra um provedor OIDC falso local
+  (`httptest`, sem Keycloak real) - assinatura válida extraindo papéis e
+  `provider_id`, token sem papéis, assinatura adulterada rejeitada,
+  audiência errada rejeitada, `exp`/`nbf` respeitando `AUTH_CLOCK_SKEW` com
+  valores escritos à mão e um relógio injetado (tanto aceitando quanto
+  rejeitando conforme a tolerância, nos dois lados - vencido e futuro),
+  token sem `exp` rejeitado, e a descoberta OIDC expirando o prazo de start
+  contra um issuer inalcançável.
 - `internal/walletapp`: os casos de uso de abertura e leitura de carteira,
   com repositórios e unidade de trabalho falsos - abertura com saldo
   positivo grava transação, ledger e os dois eventos de outbox; saldo zero
@@ -233,7 +371,12 @@ existir, o teste falha pedindo para rodar `scripts/wait-for-integration.sh`.
   via a aplicação Fx completa subida com `fxtest` numa porta livre
   (`appHarness`, em `apphttp_test.go`) - saldo positivo e zero, conflito,
   aberturas concorrentes, entrada inválida, leitura e falha transitória do
-  banco por `lock_timeout`, com asserções no banco para ledger e outbox.
+  banco por `lock_timeout`, com asserções no banco para ledger e outbox. E a
+  autenticação/autorização contra um Keycloak real (`auth_test.go`, tokens
+  obtidos por client via `keycloak_test.go`) - token ausente, assinatura
+  inválida e token expirado devolvendo `401`; client sem papel e o papel
+  `provider` em `/wallets` devolvendo `403` (em POST e em GET); `wallet-admin`
+  passando; nenhum desses casos negados cria carteira.
 
 ## Idempotência e segundo `docker compose up`
 

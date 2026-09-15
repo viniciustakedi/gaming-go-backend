@@ -29,23 +29,32 @@ type errorDetailItem struct {
 	Reason string `json:"reason"`
 }
 
-// writeOperationError maps a classified domain error onto the HTTP status
-// and body the spec's error catalog documents for it, and sets Retry-After
-// for a transient failure so the caller knows it is safe, and worth it, to
-// retry (spec: "Falha transitória do banco devolve 503 com Retry-After").
-// details is always encoded, defaulting to an empty (not nil) slice so the
-// envelope's "details" key is never omitted or null.
-func writeOperationError(w http.ResponseWriter, err *operation.Error, details []errorDetailItem) {
-	if details == nil {
-		details = []errorDetailItem{}
-	}
-	status := statusForOperationError(err)
+// writeErrorEnvelope is the one path every rejected request's JSON body
+// goes through - operation errors (below) and auth rejections
+// (auth_middleware.go's writeAuthError) alike - so the envelope's shape
+// (errorBody) is serialized in exactly one place (ticket 07 review:
+// "writeAuthError reescreve a serialização que writeOperationError já
+// faz"). It also sets Retry-After for a transient failure so the caller
+// knows it is safe, and worth it, to retry (spec: "Falha transitória do
+// banco devolve 503 com Retry-After").
+func writeErrorEnvelope(w http.ResponseWriter, status int, body errorBody) {
 	w.Header().Set("Content-Type", "application/json")
 	if status == http.StatusServiceUnavailable {
 		w.Header().Set("Retry-After", "1")
 	}
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(errorBody{Error: errorDetail{
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// writeOperationError maps a classified domain error onto the HTTP status
+// and body the spec's error catalog documents for it. details is always
+// encoded, defaulting to an empty (not nil) slice so the envelope's
+// "details" key is never omitted or null.
+func writeOperationError(w http.ResponseWriter, err *operation.Error, details []errorDetailItem) {
+	if details == nil {
+		details = []errorDetailItem{}
+	}
+	writeErrorEnvelope(w, statusForOperationError(err), errorBody{Error: errorDetail{
 		Code:        string(err.Code()),
 		Message:     messageForCode(err.Code()),
 		Correctable: err.Classification() == operation.Correctable,
