@@ -6,6 +6,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/faultinject"
 )
 
 // Querier is the minimal pgx surface a repository needs to run a query. Both
@@ -48,6 +50,11 @@ func (u *UnitOfWork) Reader() Querier {
 // returns that error. Rolling back an already-committed transaction is a
 // documented pgx no-op, so calling Rollback unconditionally after a failed
 // Commit is safe.
+//
+// The "before-commit" fault point (spec, "Injeção de falhas e ambiente")
+// fires here, right before Commit, for every use case that goes through this
+// single transaction boundary - HTTP's Process, ResumePending and every
+// other caller. A no-op outside a `faultinject` build.
 func (u *UnitOfWork) Execute(ctx context.Context, fn func(ctx context.Context, q Querier) error) error {
 	tx, err := u.pool.Begin(ctx)
 	if err != nil {
@@ -57,6 +64,7 @@ func (u *UnitOfWork) Execute(ctx context.Context, fn func(ctx context.Context, q
 		_ = tx.Rollback(ctx)
 		return err
 	}
+	faultinject.Trigger("before-commit")
 	if err := tx.Commit(ctx); err != nil {
 		_ = tx.Rollback(ctx)
 		return err

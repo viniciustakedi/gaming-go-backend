@@ -25,6 +25,7 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/queue"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/wageringmetrics"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletapp"
+	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
 // This is seam 3a: a gateway-role client publishes to the real FIFO while
@@ -482,21 +483,11 @@ func TestSQSConsumer_StopWaitsForLongPollAndLeavesLaterMessageVisible(t *testing
 }
 
 func sqsWagerEnvelope(t *testing.T, messageID string, in wageringBodyInput, key string) []byte {
-	t.Helper()
-	data := map[string]any{"providerId": in.ProviderID, "externalTransactionId": in.ExternalID, "idempotencyKey": key, "playerId": in.PlayerID, "walletId": in.WalletID, "roundId": in.RoundID, "gameId": in.GameID, "kind": in.Kind, "money": map[string]string{"amount": in.Amount, "currency": in.Currency}}
-	if in.ReferenceID != nil {
-		data["referenceExternalTransactionId"] = *in.ReferenceID
-	}
-	payload := map[string]any{"messageId": messageID, "type": "WagerTransactionRequested", "occurredAt": "2026-09-15T00:00:00Z", "data": data}
-	encoded, err := json.Marshal(payload)
-	requireNoError(t, err, "marshal SQS wager envelope")
-	return encoded
+	return testclient.SQSWagerEnvelope(t, messageID, in, key, "2026-09-15T00:00:00Z")
 }
 
 func sendWagerMessage(t *testing.T, client *sqs.Client, group, dedup string, body []byte) {
-	t.Helper()
-	_, err := client.SendMessage(context.Background(), &sqs.SendMessageInput{QueueUrl: aws.String(queueURL(inputQueueName())), MessageBody: aws.String(string(body)), MessageGroupId: aws.String(group), MessageDeduplicationId: aws.String(dedup)})
-	requireNoError(t, err, "gateway sends wager message")
+	testclient.SendWagerMessage(t, client, group, dedup, body)
 }
 
 func deleteMarkedDLQMessage(t *testing.T, client *sqs.Client, queueName, marker string) {

@@ -441,13 +441,27 @@ que os testes de recuperação provem uma queda real, não um desligamento
 gracioso. `internal/faultinject/faultinject_test.go` confirma o no-op mesmo
 com `FAULT_INJECT_POINT` definida, no build sem a tag.
 
-Este ticket entrega só o mecanismo - nenhuma chamada a `Trigger` existe
-ainda em `internal/wagering`, `internal/outbox` ou no consumidor SQS. O
-ticket 16 adiciona os pontos nomeados do desenho (antes do commit, depois do
-commit e antes do `DeleteMessage`, depois do commit do `PENDING_REFERENCE`,
-depois do envio da outbox e antes da confirmação, depois do claim da outbox
-e antes do envio - spec, "Injeção de falhas e ambiente") e os testes que
-efetivamente definem `FAULT_INJECT_POINT` num processo do harness abaixo.
+O ticket 15 entregou só o mecanismo - nenhuma chamada a `Trigger` existia
+ainda em `internal/walletapp`, `internal/outbox` ou no consumidor SQS. O
+ticket 16 liga os cinco pontos nomeados pela spec ("Injeção de falhas e
+ambiente"), cada um logo antes ou depois da operação que o nome descreve:
+
+| Ponto (`FAULT_INJECT_POINT`) | Onde | O que ele guarda |
+| --- | --- | --- |
+| `before-commit` | `internal/pg.UnitOfWork.Execute` (todo caso de uso HTTP - abertura, `Process`, `ResumePending`, `FailPending`, `ReschedulePendingAfterFailure`) e `internal/consumer.processOnce` (as duas transações SQS: nova operação e duplicata reconhecida) | Nada foi persistido ainda - a próxima linha é o `Commit`. |
+| `after-commit-before-delete` | `internal/consumer.handle`, logo após `RecordOutcome`/a métrica de duplicata | A transação SQS (inbox + efeito na carteira) já comitou; só falta `DeleteMessage`. |
+| `after-pending-reference-commit` | `internal/walletapp.Process` (HTTP) e `internal/consumer.handle` (SQS), só quando o resultado é `PENDING_REFERENCE` novo, nunca um replay | O `PENDING_REFERENCE` já comitou; falta responder ao chamador. |
+| `after-outbox-claim-before-send` | `internal/outbox.Publisher.publish`, antes de `Queue.Send` | O registro já foi reivindicado (lease empurrado); nada foi enviado ao SQS ainda. |
+| `after-outbox-send-before-confirm` | `internal/outbox.Publisher.publish`, depois de `Queue.Send` | O evento já chegou ao SQS; falta só `MarkPublished`. |
+
+Cada ponto é um no-op fora da tag `faultinject` (a mesma verificação do
+ticket 15, agora também exercida por esses cinco call sites via
+`go vet ./...`/`go test -race ./...` sem a tag). Com a tag, `Trigger`
+bloqueia (`select {}`) depois de mandar o `SIGKILL`: o próprio `syscall.Kill`
+só enfileira o sinal, não interrompe a goroutine na mesma instrução - sem o
+bloqueio, uma chamada de rede já em andamento (como o `Commit` ou o `Send`
+que o ponto pretende impedir) podia terminar antes do processo
+efetivamente morrer.
 
 ## Múltiplas instâncias
 
@@ -508,6 +522,75 @@ conferido contra o ledger. Cada teste encerra suas próprias instâncias com
 `SIGTERM` ao final (ou, no cenário de reinício, já as matou) e falha se o
 log combinado (stdout/stderr) de qualquer uma contiver um relatório do race
 detector (`WARNING: DATA RACE`).
+
+### Cenários de recuperação (ticket 16)
+
+`test/multiinstance/faultinject_test.go`, mesma build tag `multiinstance` e
+mesma infraestrutura acima. Cada cenário compila o mesmo binário
+`-race -tags faultinject`, sobe uma instância "vítima" com
+`FAULT_INJECT_POINT` num dos cinco pontos da tabela acima, espera-a morrer
+de verdade (`waitExit`, nunca um `SIGTERM` externo) e só então sobe uma
+instância "resgate" sem esse ponto para concluir o trabalho interrompido -
+nunca uma queda simulada em memória, sempre um processo real morto no meio
+de uma operação real contra o mesmo Postgres, MiniStack e Keycloak que as
+instâncias saudáveis usam. Todo cenário fecha conferindo o saldo armazenado
+contra créditos menos débitos do ledger (leitura direta do Postgres) e falha
+se o log de qualquer instância contiver `WARNING: DATA RACE`.
+
+```sh
+scripts/wait-for-integration.sh
+go test -race -tags multiinstance -timeout 10m -count=1 -run 'TestMultiInstance_ConsumerDies|TestMultiInstance_OutboxPublisher|TestMultiInstance_TwoPublishersDispute|TestMultiInstance_DiesAfterPendingReference|TestMultiInstance_PendingReferenceExpires|TestMultiInstance_RefundBeforeBet|TestMultiInstance_CrossingHTTPAndSQS' ./test/multiinstance/...
+```
+
+Cada cenário também roda isolado, com o mesmo `-run` trocado pelo nome do
+teste:
+
+- `TestMultiInstance_ConsumerDiesAfterCommitBeforeDelete_RedeliveredAndAcknowledgedOnce` -
+  ponto `after-commit-before-delete`. A vítima debita a carteira e morre
+  antes do `DeleteMessage`; a reentrega, após o `SQS_CONSUMER_VISIBILITY_TIMEOUT`
+  curto expirar, é reconhecida pela inbox por outra instância, que apaga a
+  mensagem sem debitar de novo - `sqs_consumer_duplicate_messages_total` da
+  instância de resgate confirma a reentrega.
+- `TestMultiInstance_ConsumerDiesBeforeCommit_RedeliveryProcessesOnce` -
+  ponto `before-commit`. A vítima morre antes de comitar a transação SQS;
+  nem a linha da inbox nem o efeito na carteira sobrevivem (uma linha não
+  comitada nunca é visível a outra conexão), e a reentrega processa a
+  operação uma única vez.
+- `TestMultiInstance_OutboxPublisherDiesAfterSendBeforeConfirm_AnotherInstanceRepublishesSameEventID` -
+  ponto `after-outbox-send-before-confirm`, com `OUTBOX_LEASE` curto. A
+  vítima já enviou o evento ao SQS quando morre, sem confirmar
+  `publishedAt`; outra instância reivindica o lease expirado e republica com
+  o mesmo `eventId` - nenhum evento confirmado se perde, e o leitor
+  (`events-reader`) dedupica por `eventId`.
+- `TestMultiInstance_OutboxPublisherDiesAfterClaimBeforeSend_LeaseExpiresAndAnotherInstancePublishes` -
+  ponto `after-outbox-claim-before-send`. A vítima morre logo após reivindicar
+  o lote, sem nunca chamar `Send`; o lease expira e outra instância publica.
+- `TestMultiInstance_DiesAfterPendingReferenceCommit_AnotherInstanceWorkerCompletes` -
+  ponto `after-pending-reference-commit`. Um `REFUND` sem a `BET`
+  referenciada ainda comita como `PENDING_REFERENCE` e a vítima morre antes
+  de responder; a `BET` chega por outra instância, e o worker de referências
+  pendentes dessa mesma instância conclui a operação.
+- `TestMultiInstance_RefundBeforeBet_SurvivesAllInstancesRestarted` - sem
+  ponto nomeado, mata as três instâncias saudáveis com `SIGKILL`
+  (`restartTrio`, o mesmo "queda indiferenciada de todas ao mesmo tempo" do
+  ticket 15) com o `REFUND` ainda `PENDING_REFERENCE`. A pendência sobrevive
+  à perda da memória das três, e é resolvida assim que a `BET` chega ao
+  trio reiniciado.
+- `TestMultiInstance_CrossingHTTPAndSQS_ConsumerDiesMidway_SameOperationSettlesOnce` -
+  ponto `after-commit-before-delete`, cruzando canais: a mesma operação
+  processada por SQS numa vítima morta antes do delete é replay por HTTP
+  numa segunda instância (`idempotentReplay: true`, mesma `transactionId`)
+  enquanto a mensagem original ainda está invisível, e só depois reentregue
+  por SQS a uma terceira - um único débito ao final, qualquer que seja o
+  canal consultado.
+
+Os helpers de SQS de teste (credenciais `gateway`/`events-reader`,
+nome/URL das filas, envelope `WagerTransactionRequested`) vivem em
+`test/testclient/sqs.go`, compartilhados pelos dois harnesses:
+`test/integration/iam_test.go` e `test/integration/sqs_consumer_test.go`, de
+um lado, e `test/multiinstance/sqs_test.go`, do outro, apenas delegam para
+eles - ver os comentários dos arquivos e "Escopo descoberto" no ticket para
+o histórico da extração.
 
 ## Idempotência e segundo `docker compose up`
 

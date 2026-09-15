@@ -45,8 +45,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
@@ -68,19 +66,9 @@ type roleCreds struct {
 	redriveMaxReceiveCount int
 }
 
-func testEndpoint() string {
-	if v := os.Getenv("SQS_ENDPOINT_URL"); v != "" {
-		return v
-	}
-	return "http://localhost:4566"
-}
+func testEndpoint() string { return testclient.SQSEndpoint() }
 
-func testRegion() string {
-	if v := os.Getenv("SQS_REGION"); v != "" {
-		return v
-	}
-	return "us-east-1"
-}
+func testRegion() string { return testclient.SQSRegion() }
 
 // loadTestCreds reads both credential files provision.sh writes: this test
 // suite needs to authenticate as every role, including consumer and
@@ -148,40 +136,19 @@ func loadTestCreds(t *testing.T) roleCreds {
 }
 
 func sqsClient(t *testing.T, accessKeyID, secretAccessKey string) *sqs.Client {
-	t.Helper()
-	cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
-		awsconfig.WithRegion(testRegion()),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, "")),
-	)
-	if err != nil {
-		t.Fatalf("build sqs client: %v", err)
-	}
-	endpoint := testEndpoint()
-	return sqs.NewFromConfig(cfg, func(o *sqs.Options) { o.BaseEndpoint = aws.String(endpoint) })
+	return testclient.NewSQSClient(t, accessKeyID, secretAccessKey)
 }
 
-func accountID() string {
-	if v := os.Getenv("MINISTACK_ACCOUNT_ID"); v != "" {
-		return v
-	}
-	return "000000000000"
-}
+func accountID() string { return testclient.SQSAccountID() }
 
 // queueURL builds the queue URL directly instead of calling GetQueueUrl:
 // not every role in the IAM model has that action on every queue this test
 // touches (gateway, for instance, has no GetQueueUrl at all - see
 // provision.sh), and MiniStack's URL shape is a stable, documented
 // convention, {endpoint}/{accountId}/{queueName}.
-func queueURL(name string) string {
-	return fmt.Sprintf("%s/%s/%s", strings.TrimSuffix(testEndpoint(), "/"), accountID(), name)
-}
+func queueURL(name string) string { return testclient.QueueURL(name) }
 
-func inputQueueName() string {
-	if v := os.Getenv("SQS_INPUT_QUEUE_NAME"); v != "" {
-		return v
-	}
-	return "wager-transactions.fifo"
-}
+func inputQueueName() string { return testclient.InputQueueName() }
 
 func dlqQueueName() string {
 	if v := os.Getenv("SQS_DLQ_QUEUE_NAME"); v != "" {
@@ -190,12 +157,7 @@ func dlqQueueName() string {
 	return "wager-transactions-dlq.fifo"
 }
 
-func outputQueueName() string {
-	if v := os.Getenv("SQS_OUTPUT_QUEUE_NAME"); v != "" {
-		return v
-	}
-	return "wallet-events.fifo"
-}
+func outputQueueName() string { return testclient.OutputQueueName() }
 
 func assertAllowed(t *testing.T, name string, err error) {
 	t.Helper()

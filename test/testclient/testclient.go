@@ -65,8 +65,8 @@ type WageringHTTPResponse struct {
 }
 
 // WageringBodyInput is the input to WageringBody - every field the wagering
-// HTTP contract accepts, ReferenceID included for REFUND/ROLLBACK (seam 3a
-// only; seam 3b does not exercise those kinds yet).
+// HTTP contract accepts, ReferenceID included for REFUND/ROLLBACK (seam 3a,
+// and, since ticket 16's fault-injection scenarios, seam 3b too).
 type WageringBodyInput struct {
 	ProviderID  string
 	ExternalID  string
