@@ -139,6 +139,11 @@ func TestLoad_RejectsNonPositiveDurations(t *testing.T) {
 		"DATABASE_LOCK_TIMEOUT":      "0s",
 		"DATABASE_STATEMENT_TIMEOUT": "-1s",
 		"SQS_STARTUP_TIMEOUT":        "-5s",
+		"OUTBOX_POLL_INTERVAL":       "0s",
+		"OUTBOX_LEASE":               "-1s",
+		"OUTBOX_BATCH_SIZE":          "0",
+		"OUTBOX_RETRY_BASE":          "0s",
+		"OUTBOX_RETRY_MAX":           "-1s",
 		"AUTH_CLOCK_SKEW":            "0s",
 		"AUTH_DISCOVERY_TIMEOUT":     "-1s",
 		"FX_STOP_TIMEOUT":            "0s",
@@ -155,6 +160,18 @@ func TestLoad_RejectsNonPositiveDurations(t *testing.T) {
 				t.Fatalf("want error for non-positive %s=%q, got nil", key, value)
 			}
 		})
+	}
+}
+
+func TestLoad_RejectsOutboxRetryMaximumBelowBase(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+	t.Setenv("OUTBOX_RETRY_BASE", "2s")
+	t.Setenv("OUTBOX_RETRY_MAX", "1s")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("want error when OUTBOX_RETRY_MAX is below OUTBOX_RETRY_BASE")
 	}
 }
 

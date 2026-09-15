@@ -6,6 +6,7 @@ import "go.uber.org/fx"
 // start and contributes a readiness Check to the "readiness" value group.
 var Module = fx.Module("sqs",
 	fx.Provide(New),
+	fx.Provide(NewOutboxPublisher),
 	fx.Provide(
 		fx.Annotate(
 			readinessCheck,

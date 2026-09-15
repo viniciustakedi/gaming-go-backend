@@ -11,6 +11,8 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/httpapi"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/logging"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/metrics"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/outbox"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/outboxpg"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/pg"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/queue"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletpg"
@@ -28,6 +30,8 @@ var Modules = fx.Options(
 	queue.Module,
 	auth.Module,
 	walletpg.Module,
+	outboxpg.Module,
+	outbox.Module,
 	httpapi.Module,
 )
 

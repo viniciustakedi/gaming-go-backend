@@ -48,6 +48,17 @@ curl http://localhost:8080/metrics
 na ordem: readiness cai para `503`, o servidor HTTP drena requisições em
 andamento, e só depois o pool do Postgres fecha.
 
+## Eventos de carteira
+
+Eventos de integração são gravados na outbox na mesma transação que a
+carteira, o ledger e a transação; o publisher só os envia depois do commit.
+Ele publica o snapshot JSON persistido em `wallet-events.fifo`, com
+`MessageGroupId = walletId` e `MessageDeduplicationId = eventId`. O
+consumidor deve rotear por `eventType`, desserializar `data` no tipo concreto,
+deduplicar por `eventId` mesmo fora da janela de cinco minutos do FIFO e usar
+`walletVersion` para ordenar projeções de saldo: uma republicação após lease
+expirado pode chegar depois de um evento mais novo.
+
 ## Variáveis de ambiente
 
 Ver `.env.example`. `docker compose` lê um `.env` na raiz automaticamente;
