@@ -125,6 +125,17 @@ type ExistingTransaction struct {
 	FailureCode           string
 	ResultingBalance      *int64
 	Currency              money.Currency
+	PendingExpiresAt      *time.Time
+}
+
+// PendingReferenceTransaction is the worker's locked view of a durable
+// operation awaiting its reference. The transaction stays in the domain type;
+// retry metadata belongs to the application persistence boundary.
+type PendingReferenceTransaction struct {
+	Transaction      *domainwallet.WagerTransaction
+	Attempts         int
+	PendingExpiresAt time.Time
+	Expired          bool
 }
 
 // WagerTransactionRepository persists and looks up a wager transaction.
@@ -145,6 +156,11 @@ type WagerTransactionRepository interface {
 	// reports which of the two happened, so the caller knows whether it
 	// must roll back and reclassify in a fresh transaction.
 	InsertNew(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) (inserted bool, err error)
+	// InsertPending persists a newly accepted out-of-order operation and its
+	// retry schedule in the same transaction as its pending-reference event.
+	// The adapter computes pendingExpiresAt from its database clock and returns
+	// the stored value for the event and the HTTP 202 response.
+	InsertPending(ctx context.Context, t *domainwallet.WagerTransaction, nextAttemptAt time.Time, ttl time.Duration) (pendingExpiresAt time.Time, inserted bool, err error)
 	// FindByIdempotencyKey and FindByExternalTransactionID each return
 	// ErrNotFound when no row matches; both are scoped to providerID, since
 	// idempotency keys and external transaction ids are only unique per
@@ -163,6 +179,17 @@ type WagerTransactionRepository interface {
 	// BET aceita uma única reversão bem-sucedida"). Only meaningful once
 	// the reference itself is PROCESSED.
 	ExistsSuccessfulReversal(ctx context.Context, referenceTransactionID string) (bool, error)
+	// FindPendingForUpdate rereads a claimed record after its wallet lock is
+	// held. It must lock the transaction row, preventing an expired lease from
+	// allowing two workers to complete it.
+	FindPendingForUpdate(ctx context.Context, transactionID string) (*PendingReferenceTransaction, error)
+	// ReschedulePending records one unsuccessful reference lookup. retryDelay
+	// is applied against the database clock so an app-host clock cannot make a
+	// retry eligible early or late.
+	ReschedulePending(ctx context.Context, transactionID string, attempts int, retryDelay time.Duration) error
+	// CompletePending persists the state transition after the worker has
+	// evaluated a reference under the wallet and transaction locks.
+	CompletePending(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error
 	// FindDetailByID returns the full record for the internal transaction
 	// id, unscoped by provider - GetTransactionUseCase.ByID applies the
 	// isolation rule itself, since only it knows whether the caller is

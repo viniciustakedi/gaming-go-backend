@@ -412,7 +412,7 @@ func (e envelope) input() (walletapp.ProcessOperationInput, error) {
 	if err != nil {
 		return walletapp.ProcessOperationInput{}, err
 	}
-	return walletapp.ProcessOperationInput{Request: operation.Request{ProviderID: e.Data.ProviderID, ExternalTransactionID: e.Data.ExternalTransactionID, PlayerID: e.Data.PlayerID, WalletID: e.Data.WalletID, RoundID: e.Data.RoundID, GameID: e.Data.GameID, Kind: domainwallet.WagerKind(e.Data.Kind), Money: amount, ReferenceExternalTransactionID: e.Data.ReferenceExternalTransactionID}, IdempotencyKey: e.Data.IdempotencyKey, CorrelationID: e.MessageID, Channel: walletapp.ChannelSQS}, nil
+	return walletapp.ProcessOperationInput{Request: operation.Request{ProviderID: e.Data.ProviderID, ExternalTransactionID: e.Data.ExternalTransactionID, PlayerID: e.Data.PlayerID, WalletID: e.Data.WalletID, RoundID: e.Data.RoundID, GameID: e.Data.GameID, Kind: domainwallet.WagerKind(e.Data.Kind), Money: amount, ReferenceExternalTransactionID: e.Data.ReferenceExternalTransactionID}, IdempotencyKey: e.Data.IdempotencyKey, CorrelationID: e.MessageID, CausationID: e.MessageID, Channel: walletapp.ChannelSQS}, nil
 }
 
 var (
@@ -423,7 +423,7 @@ var (
 
 func isPermanent(err error) bool {
 	var domainErr *operation.Error
-	return errors.Is(err, errInboxHashMismatch) || errors.Is(err, walletapp.ErrOperationNotSupported) || (errors.As(err, &domainErr) && domainErr.Classification() != operation.Unavailable)
+	return errors.Is(err, errInboxHashMismatch) || (errors.As(err, &domainErr) && domainErr.Classification() != operation.Unavailable)
 }
 func permanentReason(err error) string {
 	if errors.Is(err, errMalformedEnvelope) {

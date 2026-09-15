@@ -131,22 +131,30 @@ func TestLoad_RejectsUserinfoInDatabaseHost(t *testing.T) {
 
 func TestLoad_RejectsNonPositiveDurations(t *testing.T) {
 	cases := map[string]string{
-		"HTTP_READ_TIMEOUT":          "0s",
-		"HTTP_WRITE_TIMEOUT":         "-1s",
-		"HTTP_SHUTDOWN_TIMEOUT":      "0s",
-		"HTTP_READINESS_TIMEOUT":     "-2s",
-		"DATABASE_PING_TIMEOUT":      "0s",
-		"DATABASE_LOCK_TIMEOUT":      "0s",
-		"DATABASE_STATEMENT_TIMEOUT": "-1s",
-		"SQS_STARTUP_TIMEOUT":        "-5s",
-		"OUTBOX_POLL_INTERVAL":       "0s",
-		"OUTBOX_LEASE":               "-1s",
-		"OUTBOX_BATCH_SIZE":          "0",
-		"OUTBOX_RETRY_BASE":          "0s",
-		"OUTBOX_RETRY_MAX":           "-1s",
-		"AUTH_CLOCK_SKEW":            "0s",
-		"AUTH_DISCOVERY_TIMEOUT":     "-1s",
-		"FX_STOP_TIMEOUT":            "0s",
+		"HTTP_READ_TIMEOUT":                 "0s",
+		"HTTP_WRITE_TIMEOUT":                "-1s",
+		"HTTP_SHUTDOWN_TIMEOUT":             "0s",
+		"HTTP_READINESS_TIMEOUT":            "-2s",
+		"DATABASE_PING_TIMEOUT":             "0s",
+		"DATABASE_LOCK_TIMEOUT":             "0s",
+		"DATABASE_STATEMENT_TIMEOUT":        "-1s",
+		"SQS_STARTUP_TIMEOUT":               "-5s",
+		"OUTBOX_POLL_INTERVAL":              "0s",
+		"OUTBOX_LEASE":                      "-1s",
+		"OUTBOX_BATCH_SIZE":                 "0",
+		"OUTBOX_RETRY_BASE":                 "0s",
+		"OUTBOX_RETRY_MAX":                  "-1s",
+		"REFERENCE_WORKER_POLL_INTERVAL":    "0s",
+		"REFERENCE_WORKER_LEASE":            "-1s",
+		"REFERENCE_WORKER_BATCH_SIZE":       "0",
+		"REFERENCE_WORKER_RETRY_BASE":       "0s",
+		"REFERENCE_WORKER_RETRY_MAX":        "-1s",
+		"REFERENCE_WORKER_MAX_ATTEMPTS":     "0",
+		"REFERENCE_WORKER_TTL":              "-1s",
+		"REFERENCE_WORKER_SHUTDOWN_TIMEOUT": "0s",
+		"AUTH_CLOCK_SKEW":                   "0s",
+		"AUTH_DISCOVERY_TIMEOUT":            "-1s",
+		"FX_STOP_TIMEOUT":                   "0s",
 	}
 	for key, value := range cases {
 		t.Run(key+"="+value, func(t *testing.T) {
@@ -179,12 +187,13 @@ func TestLoad_RejectsInsufficientStopTimeout(t *testing.T) {
 	for k, v := range validEnv(t) {
 		t.Setenv(k, v)
 	}
-	// HTTP_SHUTDOWN_TIMEOUT is the only internal stop deadline today; setting
-	// FX_STOP_TIMEOUT equal to it (rather than strictly greater) must fail,
+	// FX_STOP_TIMEOUT equal to the configured internal deadlines must fail,
 	// since the Fx-wide deadline would expire at the same instant the HTTP
 	// drain is still allowed to run.
 	t.Setenv("HTTP_SHUTDOWN_TIMEOUT", "20s")
-	t.Setenv("FX_STOP_TIMEOUT", "20s")
+	t.Setenv("SQS_CONSUMER_SHUTDOWN_TIMEOUT", "1s")
+	t.Setenv("REFERENCE_WORKER_SHUTDOWN_TIMEOUT", "1s")
+	t.Setenv("FX_STOP_TIMEOUT", "32s")
 
 	_, err := Load()
 	if err == nil {

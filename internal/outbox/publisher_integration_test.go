@@ -179,7 +179,9 @@ func publisherTestDependencies(t *testing.T) (config.Config, *pgxpool.Pool, *que
 	t.Setenv("DATABASE_NAME", database)
 	t.Setenv("DATABASE_SSLMODE", sslmode)
 	t.Setenv("DATABASE_APP_CREDENTIALS_FILE", filepath.Join("..", "..", "deploy", "postgres", ".runtime", "credentials.env"))
-	t.Setenv("SQS_ENDPOINT_URL", "http://localhost:4566")
+	if os.Getenv("SQS_ENDPOINT_URL") == "" {
+		t.Setenv("SQS_ENDPOINT_URL", "http://localhost:4566")
+	}
 	t.Setenv("AUTH_ISSUER_URL", "http://localhost:8081/realms/wallet")
 
 	credentialsPath := filepath.Join("..", "..", "deploy", "ministack", ".runtime", "app-credentials.env")
@@ -329,7 +331,11 @@ func eventsReader(t *testing.T) *sqs.Client {
 	if err != nil {
 		t.Fatalf("build events-reader client: %v", err)
 	}
-	return sqs.NewFromConfig(awsCfg, func(options *sqs.Options) { options.BaseEndpoint = aws.String("http://localhost:4566") })
+	endpoint := os.Getenv("SQS_ENDPOINT_URL")
+	if endpoint == "" {
+		endpoint = "http://localhost:4566"
+	}
+	return sqs.NewFromConfig(awsCfg, func(options *sqs.Options) { options.BaseEndpoint = aws.String(endpoint) })
 }
 
 func receiveEvent(t *testing.T, reader *sqs.Client, queueURL, eventID string, timeout time.Duration) int {

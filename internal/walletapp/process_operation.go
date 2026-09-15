@@ -19,16 +19,6 @@ const (
 	ChannelSQS  = "SQS"
 )
 
-// ErrOperationNotSupported is returned for a REFUND, ROLLBACK or referenced
-// WIN whose reference has not arrived yet, or has arrived but is itself
-// still PENDING_REFERENCE - the two cases operation.Evaluate reports as
-// WaitForReference. Persisting that wait as a durable PENDING_REFERENCE row
-// is ticket 11's job: it needs the attempt/lease columns this ticket's
-// repositories do not populate, and a worker to retry them. Every reference
-// that has actually arrived and reached a terminal status is resolved and
-// evaluated by this ticket instead of reaching this error.
-var ErrOperationNotSupported = errors.New("walletapp: operation's reference is not yet resolvable, PENDING_REFERENCE not implemented by this ticket")
-
 // ErrRetryInNewTransaction signals that the wager-transaction INSERT found
 // nothing to insert (spec, decision 3, step 5's ON CONFLICT DO NOTHING
 // backstop): a concurrent writer whose request body carried a different
@@ -49,6 +39,11 @@ var ErrRetryInNewTransaction = errors.New("walletapp: wager insert conflicted, r
 // stable-looking but bogus zero balance.
 var ErrCorruptedResultingBalance = errors.New("walletapp: persisted balance is not a valid amount for its currency")
 
+// ErrInvalidPersistedTransaction marks a row that cannot be rehydrated into a
+// valid domain transaction. A worker must fail this explicitly corrupt state,
+// while all unclassified infrastructure errors remain retryable.
+var ErrInvalidPersistedTransaction = errors.New("walletapp: persisted transaction violates invariants")
+
 // ErrOperationNotPrepared is returned when ExecuteInTx is handed a
 // PreparedOperation that Prepare did not produce - the zero value, above
 // all, since PreparedOperation exposes no exported fields and no exported
@@ -66,7 +61,10 @@ type ProcessOperationInput struct {
 	// request or message that caused them (spec: "correlationId vem do
 	// header X-Correlation-Id ou é gerado no HTTP; no SQS, é o messageId").
 	CorrelationID string
-	Channel       string
+	// CausationID identifies the command that directly caused emitted events.
+	// HTTP has none; the SQS adapter supplies its messageId.
+	CausationID string
+	Channel     string
 }
 
 // ProcessOperationResult is the stable, replay-safe answer the provider
@@ -78,9 +76,26 @@ type ProcessOperationResult struct {
 	Status           domainwallet.TransactionStatus
 	FailureCode      string
 	Balance          money.Money
+	PendingExpiresAt *time.Time
 	IdempotentReplay bool
 	kind             domainwallet.WagerKind
 }
+
+// PendingResumeSettings controls one durable pending-reference retry. The
+// worker supplies these values from configuration, keeping HTTP/SQS request
+// processing free from polling concerns.
+type PendingResumeSettings struct {
+	MaxAttempts int
+	RetryDelay  time.Duration
+}
+
+type PendingResumeOutcome string
+
+const (
+	PendingRescheduled PendingResumeOutcome = "rescheduled"
+	PendingProcessed   PendingResumeOutcome = "processed"
+	PendingRejected    PendingResumeOutcome = "rejected"
+)
 
 // PreparedOperation is Prepare's result: an input already validated and
 // hashed, ready for ExecuteInTx to run against a transaction's repositories
@@ -126,15 +141,25 @@ func (p PreparedOperation) Decision() operation.Decision {
 // apply the movement, the ledger entry, the wallet update and the outbox
 // records in the one transaction that commits.
 type ProcessOperationUseCase struct {
-	uow     UnitOfWork
-	metrics OperationMetrics
-	now     func() time.Time
+	uow        UnitOfWork
+	metrics    OperationMetrics
+	now        func() time.Time
+	pendingTTL time.Duration
 }
 
 // NewProcessOperationUseCase wires the use case to its unit of work and
 // metrics port. now defaults to time.Now; tests substitute a fixed clock.
 func NewProcessOperationUseCase(uow UnitOfWork, metrics OperationMetrics) *ProcessOperationUseCase {
-	return &ProcessOperationUseCase{uow: uow, metrics: metrics, now: time.Now}
+	return &ProcessOperationUseCase{uow: uow, metrics: metrics, now: time.Now, pendingTTL: 24 * time.Hour}
+}
+
+// SetPendingReferenceTTL applies the configured lifetime before an accepted
+// out-of-order operation is finally rejected. It is called during Fx graph
+// construction, before either HTTP or SQS workers start.
+func (uc *ProcessOperationUseCase) SetPendingReferenceTTL(ttl time.Duration) {
+	if ttl > 0 {
+		uc.pendingTTL = ttl
+	}
 }
 
 // Prepare runs decision 3's step 1 - validate the idempotency key, compute
@@ -319,10 +344,240 @@ func (uc *ProcessOperationUseCase) attempt(ctx context.Context, repos Repositori
 		return ProcessOperationResult{}, false, err
 	}
 	if resolvedDecision.Action == operation.WaitForReference {
-		return ProcessOperationResult{}, false, ErrOperationNotSupported
+		return uc.processPendingNew(ctx, repos, walletValue, input, hash, now)
 	}
 
 	return uc.processNew(ctx, repos, walletValue, input, hash, resolvedDecision, reference, now)
+}
+
+func (uc *ProcessOperationUseCase) processPendingNew(ctx context.Context, repos Repositories, walletValue *domainwallet.Wallet, input ProcessOperationInput, hash string, now time.Time) (ProcessOperationResult, bool, error) {
+	transactionID, err := newID()
+	if err != nil {
+		return ProcessOperationResult{}, false, err
+	}
+	referenceExternalID := ""
+	if input.Request.ReferenceExternalTransactionID != nil {
+		referenceExternalID = *input.Request.ReferenceExternalTransactionID
+	}
+	transaction, err := domainwallet.NewExternalTransaction(domainwallet.ExternalTransactionInput{ID: transactionID, ExternalTransactionID: input.Request.ExternalTransactionID, ProviderID: input.Request.ProviderID, IdempotencyKey: input.IdempotencyKey, PayloadHash: hash, WalletID: input.Request.WalletID, PlayerID: input.Request.PlayerID, RoundID: input.Request.RoundID, GameID: input.Request.GameID, Kind: input.Request.Kind, Money: input.Request.Money, ReferenceExternalTransactionID: referenceExternalID, CreatedAt: now})
+	if err != nil {
+		return ProcessOperationResult{}, false, fmt.Errorf("walletapp: build pending wager transaction: %w", err)
+	}
+	if err := transaction.MarkPendingReference(now); err != nil {
+		return ProcessOperationResult{}, false, fmt.Errorf("walletapp: mark pending reference: %w", err)
+	}
+	expiresAt, inserted, err := repos.Transactions.InsertPending(ctx, transaction, now, uc.pendingTTL)
+	if err != nil {
+		return ProcessOperationResult{}, false, fmt.Errorf("walletapp: insert pending wager transaction: %w", err)
+	}
+	if !inserted {
+		return ProcessOperationResult{}, true, nil
+	}
+	eventID, err := newID()
+	if err != nil {
+		return ProcessOperationResult{}, false, err
+	}
+	event, err := domainwallet.NewWagerTransactionPendingReference(domainwallet.EventMetadata{EventID: eventID, CorrelationID: input.CorrelationID, CausationID: input.CausationID, OccurredAt: now}, transaction, expiresAt)
+	if err != nil {
+		return ProcessOperationResult{}, false, fmt.Errorf("walletapp: build pending reference event: %w", err)
+	}
+	if err := repos.Outbox.Insert(ctx, OutboxRecord{EventID: event.EventID, EventType: event.EventType, AggregateType: "WagerTransaction", AggregateID: event.AggregateID, EventVersion: event.Version, OccurredAt: now, Payload: event}); err != nil {
+		return ProcessOperationResult{}, false, fmt.Errorf("walletapp: insert pending reference event: %w", err)
+	}
+	return ProcessOperationResult{TransactionID: transaction.ID(), Status: domainwallet.PendingReference, PendingExpiresAt: &expiresAt, kind: input.Request.Kind}, false, nil
+}
+
+// ResumePending retries one previously accepted operation in its own
+// transaction. It locks wallet first and transaction second, matching the
+// synchronous flow; a worker that lost its lease therefore rereads the state
+// under the same ordering before it can create a financial effect.
+func (uc *ProcessOperationUseCase) ResumePending(ctx context.Context, transactionID, walletID string, settings PendingResumeSettings) (PendingResumeOutcome, error) {
+	var outcome PendingResumeOutcome
+	err := uc.uow.WithinTx(ctx, func(ctx context.Context, repos Repositories) error {
+		now := uc.now()
+		walletValue, err := repos.Wallets.FindForUpdate(ctx, walletID)
+		if err != nil {
+			return fmt.Errorf("walletapp: lock pending wallet: %w", err)
+		}
+		pending, err := repos.Transactions.FindPendingForUpdate(ctx, transactionID)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("walletapp: lock pending transaction: %w", err)
+		}
+		transaction := pending.Transaction
+		if transaction.Status() != domainwallet.PendingReference {
+			return nil
+		}
+
+		req := operation.Request{ProviderID: transaction.ProviderID(), ExternalTransactionID: transaction.ExternalTransactionID(), PlayerID: transaction.PlayerID(), WalletID: transaction.WalletID(), RoundID: transaction.RoundID(), GameID: transaction.GameID(), Kind: transaction.Kind(), Money: transaction.Money()}
+		refExternalID := transaction.ReferenceExternalTransactionID()
+		req.ReferenceExternalTransactionID = &refExternalID
+		decision, err := operation.Evaluate(req, nil, false)
+		if err != nil {
+			return fmt.Errorf("walletapp: evaluate pending transaction: %w", err)
+		}
+		decision, reference, err := uc.resolveDecision(ctx, repos, req, decision)
+		if err != nil {
+			return err
+		}
+		if decision.Action == operation.Process || decision.Action == operation.Reject {
+			if decision.Action == operation.Reject {
+				if reference != nil {
+					if err := transaction.ResolveReference(reference.ID()); err != nil {
+						return fmt.Errorf("walletapp: resolve rejected pending reference: %w", err)
+					}
+				}
+				return uc.rejectPending(ctx, repos, transaction, walletValue, decision.Error, now, &outcome)
+			}
+			if reference == nil {
+				return errors.New("walletapp: process pending transaction without resolved reference")
+			}
+			if err := transaction.ResolveReference(reference.ID()); err != nil {
+				return fmt.Errorf("walletapp: resolve pending reference: %w", err)
+			}
+			return uc.processPending(ctx, repos, transaction, walletValue, decision, now, &outcome)
+		}
+
+		if pending.Expired || (settings.MaxAttempts > 0 && pending.Attempts >= settings.MaxAttempts) {
+			code := operation.ErrReferenceNotFound
+			reference, findErr := repos.Transactions.FindReference(ctx, transaction.ProviderID(), refExternalID)
+			if findErr == nil && reference != nil {
+				code = operation.ErrReferenceNotProcessed
+				if err := transaction.ResolveReference(reference.ID()); err != nil {
+					return fmt.Errorf("walletapp: resolve expired pending reference: %w", err)
+				}
+			} else if findErr != nil && !errors.Is(findErr, ErrNotFound) {
+				return fmt.Errorf("walletapp: find expired pending reference: %w", findErr)
+			}
+			return uc.rejectPending(ctx, repos, transaction, walletValue, code, now, &outcome)
+		}
+		if decision.Action == operation.WaitForReference {
+			if err := repos.Transactions.ReschedulePending(ctx, transaction.ID(), pending.Attempts+1, settings.RetryDelay); err != nil {
+				return fmt.Errorf("walletapp: reschedule pending transaction: %w", err)
+			}
+			outcome = PendingRescheduled
+			return nil
+		}
+		return errors.New("walletapp: unexpected pending reference decision")
+	})
+	return outcome, err
+}
+
+// FailPending records an auditable terminal outcome after the worker has
+// classified a resume error as permanent. It opens a fresh transaction because
+// the transaction that discovered the failure was rolled back.
+func (uc *ProcessOperationUseCase) FailPending(ctx context.Context, transactionID, walletID string) error {
+	return uc.uow.WithinTx(ctx, func(ctx context.Context, repos Repositories) error {
+		now := uc.now()
+		_, err := repos.Wallets.FindForUpdate(ctx, walletID)
+		if err != nil {
+			return fmt.Errorf("walletapp: lock failed pending wallet: %w", err)
+		}
+		pending, err := repos.Transactions.FindPendingForUpdate(ctx, transactionID)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("walletapp: lock failed pending transaction: %w", err)
+		}
+		transaction := pending.Transaction
+		if transaction.Status() != domainwallet.PendingReference {
+			return nil
+		}
+		if err := transaction.MarkFailed(string(operation.CodePermanentProcessingFailure), now); err != nil {
+			return fmt.Errorf("walletapp: fail pending transaction: %w", err)
+		}
+		if err := repos.Transactions.CompletePending(ctx, transaction, nil); err != nil {
+			return fmt.Errorf("walletapp: persist failed pending transaction: %w", err)
+		}
+		return nil
+	})
+}
+
+// ReschedulePendingAfterFailure gives a transient worker failure a fresh,
+// short transaction in which to persist its retry. The original transaction
+// was rolled back, so its retry metadata could not be retained there.
+func (uc *ProcessOperationUseCase) ReschedulePendingAfterFailure(ctx context.Context, transactionID, walletID string, delay time.Duration) error {
+	return uc.uow.WithinTx(ctx, func(ctx context.Context, repos Repositories) error {
+		if _, err := repos.Wallets.FindForUpdate(ctx, walletID); err != nil {
+			return fmt.Errorf("walletapp: lock retry pending wallet: %w", err)
+		}
+		pending, err := repos.Transactions.FindPendingForUpdate(ctx, transactionID)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("walletapp: lock retry pending transaction: %w", err)
+		}
+		if pending.Transaction.Status() != domainwallet.PendingReference {
+			return nil
+		}
+		if err := repos.Transactions.ReschedulePending(ctx, transactionID, pending.Attempts+1, delay); err != nil {
+			return fmt.Errorf("walletapp: reschedule transient pending failure: %w", err)
+		}
+		return nil
+	})
+}
+
+func (uc *ProcessOperationUseCase) rejectPending(ctx context.Context, repos Repositories, transaction *domainwallet.WagerTransaction, walletValue *domainwallet.Wallet, rejection *operation.Error, now time.Time, outcome *PendingResumeOutcome) error {
+	if err := transaction.MarkRejected(string(rejection.Code()), now); err != nil {
+		return fmt.Errorf("walletapp: reject pending transaction: %w", err)
+	}
+	balance, err := walletValue.Balance().MinorUnits()
+	if err != nil {
+		return fmt.Errorf("walletapp: pending rejection balance: %w", err)
+	}
+	if err := repos.Transactions.CompletePending(ctx, transaction, &balance); err != nil {
+		return fmt.Errorf("walletapp: persist pending rejection: %w", err)
+	}
+	if err := uc.writeOutboxEvents(ctx, repos, transaction, walletValue, nil, transaction.ID(), transaction.ID(), now); err != nil {
+		return err
+	}
+	*outcome = PendingRejected
+	return nil
+}
+
+func (uc *ProcessOperationUseCase) processPending(ctx context.Context, repos Repositories, transaction *domainwallet.WagerTransaction, walletValue *domainwallet.Wallet, decision operation.Decision, now time.Time, outcome *PendingResumeOutcome) error {
+	ledgerEntryID, err := newID()
+	if err != nil {
+		return err
+	}
+	movement := domainwallet.MovementInput{LedgerEntryID: ledgerEntryID, TransactionID: transaction.ID(), Money: transaction.Money(), OccurredAt: now}
+	var entry *domainwallet.WalletLedgerEntry
+	if decision.Direction == domainwallet.Debit {
+		entry, err = walletValue.Debit(movement)
+	} else {
+		entry, err = walletValue.Credit(movement)
+	}
+	if err != nil {
+		if errors.Is(err, domainwallet.ErrInsufficientFunds) {
+			return uc.rejectPending(ctx, repos, transaction, walletValue, operation.InsufficientFundsFor(transaction.Kind()), now, outcome)
+		}
+		return fmt.Errorf("walletapp: apply pending movement: %w", err)
+	}
+	if err := transaction.MarkProcessed(now); err != nil {
+		return fmt.Errorf("walletapp: process pending transaction: %w", err)
+	}
+	balance, err := walletValue.Balance().MinorUnits()
+	if err != nil {
+		return fmt.Errorf("walletapp: pending result balance: %w", err)
+	}
+	if err := repos.Transactions.CompletePending(ctx, transaction, &balance); err != nil {
+		return fmt.Errorf("walletapp: persist pending completion: %w", err)
+	}
+	if err := repos.Ledger.Insert(ctx, entry); err != nil {
+		return fmt.Errorf("walletapp: insert pending ledger entry: %w", err)
+	}
+	if err := repos.Wallets.UpdateBalance(ctx, walletValue, walletValue.Version()-1); err != nil {
+		return fmt.Errorf("walletapp: update pending wallet: %w", err)
+	}
+	if err := uc.writeOutboxEvents(ctx, repos, transaction, walletValue, entry, transaction.ID(), transaction.ID(), now); err != nil {
+		return err
+	}
+	*outcome = PendingProcessed
+	return nil
 }
 
 // resolveDecision finalizes prepared's preliminary decision for a genuinely
@@ -423,7 +678,7 @@ func toAttempt(record *ExistingTransaction) *operation.Attempt {
 // that can no longer be rebuilt into a valid Money is a corrupted record,
 // not something to answer with a silently-zeroed balance.
 func replayResult(record *ExistingTransaction) (ProcessOperationResult, error) {
-	result := ProcessOperationResult{TransactionID: record.TransactionID, Status: record.Status, FailureCode: record.FailureCode, IdempotentReplay: true}
+	result := ProcessOperationResult{TransactionID: record.TransactionID, Status: record.Status, FailureCode: record.FailureCode, PendingExpiresAt: record.PendingExpiresAt, IdempotentReplay: true}
 	if record.ResultingBalance == nil {
 		return result, nil
 	}
@@ -542,7 +797,7 @@ func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Reposit
 		}
 	}
 
-	if err := uc.writeOutboxEvents(ctx, repos, transaction, walletValue, entry, input.CorrelationID, now); err != nil {
+	if err := uc.writeOutboxEvents(ctx, repos, transaction, walletValue, entry, input.CorrelationID, input.CausationID, now); err != nil {
 		return ProcessOperationResult{}, false, err
 	}
 
@@ -559,12 +814,12 @@ func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Reposit
 // WalletBalanceChanged only when a movement actually changed the balance
 // (spec: "WagerTransactionProcessed em toda conclusão, WalletBalanceChanged
 // só com mudança de saldo").
-func (uc *ProcessOperationUseCase) writeOutboxEvents(ctx context.Context, repos Repositories, transaction *domainwallet.WagerTransaction, walletValue *domainwallet.Wallet, entry *domainwallet.WalletLedgerEntry, correlationID string, now time.Time) error {
+func (uc *ProcessOperationUseCase) writeOutboxEvents(ctx context.Context, repos Repositories, transaction *domainwallet.WagerTransaction, walletValue *domainwallet.Wallet, entry *domainwallet.WalletLedgerEntry, correlationID, causationID string, now time.Time) error {
 	eventID, err := newID()
 	if err != nil {
 		return err
 	}
-	metadata := domainwallet.EventMetadata{EventID: eventID, CorrelationID: correlationID, OccurredAt: now}
+	metadata := domainwallet.EventMetadata{EventID: eventID, CorrelationID: correlationID, CausationID: causationID, OccurredAt: now}
 
 	if transaction.Status() == domainwallet.Rejected {
 		event, err := domainwallet.NewWagerTransactionRejected(metadata, transaction)
@@ -577,6 +832,9 @@ func (uc *ProcessOperationUseCase) writeOutboxEvents(ctx context.Context, repos 
 		}); err != nil {
 			return fmt.Errorf("walletapp: insert rejected event: %w", err)
 		}
+		return nil
+	}
+	if transaction.Status() == domainwallet.Failed {
 		return nil
 	}
 
@@ -599,7 +857,7 @@ func (uc *ProcessOperationUseCase) writeOutboxEvents(ctx context.Context, repos 
 	if err != nil {
 		return err
 	}
-	balanceEvent, err := domainwallet.NewWalletBalanceChanged(domainwallet.EventMetadata{EventID: balanceEventID, CorrelationID: correlationID, OccurredAt: now}, walletValue, entry)
+	balanceEvent, err := domainwallet.NewWalletBalanceChanged(domainwallet.EventMetadata{EventID: balanceEventID, CorrelationID: correlationID, CausationID: causationID, OccurredAt: now}, walletValue, entry)
 	if err != nil {
 		return fmt.Errorf("walletapp: build balance event: %w", err)
 	}

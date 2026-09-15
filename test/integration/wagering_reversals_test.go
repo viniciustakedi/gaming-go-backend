@@ -4,9 +4,11 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 )
 
 // seam 3a - ticket 10's own slice of POST /wagering/transactions: REFUND,
@@ -499,12 +501,7 @@ func TestWageringRefund_RejectedReference_ReferenceNotProcessed(t *testing.T) {
 	}
 }
 
-// TestWageringReversal_MissingReference_NotImplemented is this ticket's own
-// documented boundary: a REFUND (or ROLLBACK, or referenced WIN) whose
-// reference has never arrived answers a plain, explicit "not implemented"
-// error rather than silently waiting or guessing - ticket 11 replaces this
-// with a persisted PENDING_REFERENCE and a retry worker.
-func TestWageringReversal_MissingReference_NotImplemented(t *testing.T) {
+func TestWageringReversal_MissingReference_IsAcceptedPending(t *testing.T) {
 	h := newAppHarness(t)
 	ctx := context.Background()
 	wallet := openWalletHTTP(t, h, "100.00")
@@ -515,18 +512,350 @@ func TestWageringReversal_MissingReference_NotImplemented(t *testing.T) {
 	requireNoError(t, h.pool.QueryRow(ctx, `SELECT count(*) FROM wager_transactions WHERE origin = 'EXTERNAL'`).Scan(&before), "count external transactions before")
 
 	resp, body := doReversal(t, h, token, wallet, "REFUND", round, "30.00", uniqueID("never-arrives"))
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501, body = %s", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body = %s", resp.StatusCode, body)
 	}
-	errResp := decodeErrorResponse(t, body)
-	if errResp.Error.Code != "REFERENCE_RESOLUTION_NOT_IMPLEMENTED" {
-		t.Errorf("error code = %q, want REFERENCE_RESOLUTION_NOT_IMPLEMENTED", errResp.Error.Code)
+	result := decodeWageringResponse(t, body)
+	if result.Status != "PENDING_REFERENCE" || result.FailureCode != "" {
+		t.Errorf("result = %+v, want PENDING_REFERENCE without failure", result)
 	}
 
 	var after int
 	requireNoError(t, h.pool.QueryRow(ctx, `SELECT count(*) FROM wager_transactions WHERE origin = 'EXTERNAL'`).Scan(&after), "count external transactions after")
-	if after != before {
-		t.Errorf("external transactions count changed from %d to %d - an unresolved reference must persist nothing", before, after)
+	if after != before+1 {
+		t.Errorf("external transactions count = %d, want %d after persisting pending operation", after, before+1)
+	}
+}
+
+func TestWageringRefund_PendingBeforeBet_IsCompletedByWorker(t *testing.T) {
+	h := newAppHarness(t)
+	ctx := context.Background()
+	wallet := openWalletHTTP(t, h, "100.00")
+	token := providerAToken(t)
+	round := uniqueID("round")
+	betExternalID := uniqueID("bet")
+
+	resp, body := doReversal(t, h, token, wallet, "REFUND", round, "30.00", betExternalID)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("pending refund status = %d, want 202, body = %s", resp.StatusCode, body)
+	}
+	pending := decodeWageringResponse(t, body)
+
+	betResp, betBody := doWagering(t, h, token, wageringBodyInput{ProviderID: "provider-a", ExternalID: betExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: round, GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency}, "idem-"+uniqueID("k"), "")
+	if betResp.StatusCode != http.StatusOK {
+		t.Fatalf("BET status = %d, want 200, body = %s", betResp.StatusCode, betBody)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var status string
+		requireNoError(t, h.pool.QueryRow(ctx, `SELECT status FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&status), "read pending refund status")
+		if status == "PROCESSED" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pending refund status = %s after worker deadline, want PROCESSED", status)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	balance, _, _ := queryWalletRow(t, ctx, h, wallet.ID)
+	if balance != 10000 {
+		t.Errorf("wallet balance = %d, want 10000 after BET then REFUND", balance)
+	}
+	if net := netLedgerBalance(t, ctx, h, wallet.ID); net != balance {
+		t.Errorf("ledger net = %d, want %d", net, balance)
+	}
+}
+
+func TestWageringRefund_PendingReferenceExpiresRejected(t *testing.T) {
+	t.Setenv("REFERENCE_WORKER_POLL_INTERVAL", "20ms")
+	t.Setenv("REFERENCE_WORKER_RETRY_BASE", "20ms")
+	t.Setenv("REFERENCE_WORKER_RETRY_MAX", "20ms")
+	t.Setenv("REFERENCE_WORKER_TTL", "100ms")
+	h := newAppHarness(t)
+	ctx := context.Background()
+	wallet := openWalletHTTP(t, h, "100.00")
+	resp, body := doReversal(t, h, providerAToken(t), wallet, "REFUND", uniqueID("round"), "30.00", uniqueID("missing"))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("pending refund status = %d, want 202, body = %s", resp.StatusCode, body)
+	}
+	pending := decodeWageringResponse(t, body)
+	deadline := time.Now().Add(5 * time.Second)
+	var status string
+	var failureCode *string
+	for time.Now().Before(deadline) {
+		requireNoError(t, h.pool.QueryRow(ctx, `SELECT status, failure_code FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&status, &failureCode), "read expired pending refund")
+		if status == "REJECTED" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if status != "REJECTED" || failureCode == nil || *failureCode != "REFERENCE_NOT_FOUND" {
+		t.Fatalf("expired pending = %s/%v, want REJECTED/REFERENCE_NOT_FOUND", status, failureCode)
+	}
+	events := queryOutboxEvents(t, ctx, h, pending.TransactionID)
+	if len(events) != 2 || events[0].eventType != "WagerTransactionPendingReference" || events[1].eventType != "WagerTransactionRejected" {
+		t.Errorf("outbox events = %+v, want pending then rejected", events)
+	}
+}
+
+// seam 3a: two full Fx compositions share the same pending row. Their
+// independent workers may race, but exactly one terminal transition and one
+// financial effect are observable after the referenced BET arrives.
+func TestPendingReference_TwoWorkersCompleteItExactlyOnce(t *testing.T) {
+	t.Setenv("REFERENCE_WORKER_POLL_INTERVAL", "20ms")
+	h1 := newAppHarness(t)
+	h2 := newAppHarness(t)
+	_ = h2 // Its independently composed worker races h1's worker through PostgreSQL.
+	ctx := context.Background()
+	wallet := openWalletHTTP(t, h1, "100.00")
+	round := uniqueID("round")
+	betExternalID := uniqueID("bet")
+
+	resp, body := doReversal(t, h1, providerAToken(t), wallet, "REFUND", round, "30.00", betExternalID)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("pending REFUND status = %d, want 202, body = %s", resp.StatusCode, body)
+	}
+	pending := decodeWageringResponse(t, body)
+	betResp, betBody := doWagering(t, h1, providerAToken(t), wageringBodyInput{ProviderID: "provider-a", ExternalID: betExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: round, GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency}, "idem-"+uniqueID("key"), "")
+	if betResp.StatusCode != http.StatusOK {
+		t.Fatalf("BET status = %d, want 200, body = %s", betResp.StatusCode, betBody)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var status string
+	for time.Now().Before(deadline) {
+		requireNoError(t, h1.pool.QueryRow(ctx, `SELECT status FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&status), "read contested pending status")
+		if status == "PROCESSED" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if status != "PROCESSED" {
+		t.Fatalf("contested pending status = %s, want PROCESSED", status)
+	}
+	if balance, _, found := queryWalletRow(t, ctx, h1, wallet.ID); !found || balance != 10000 {
+		t.Errorf("wallet balance = %d (found %v), want 10000", balance, found)
+	}
+	if entries := countLedgerEntries(t, ctx, h1, wallet.ID); entries != 3 {
+		t.Errorf("ledger entries = %d, want 3 (OPENING, BET, REFUND)", entries)
+	}
+	events := queryOutboxEvents(t, ctx, h1, pending.TransactionID)
+	if len(events) != 2 || events[0].eventType != "WagerTransactionPendingReference" || events[1].eventType != "WagerTransactionProcessed" {
+		t.Errorf("pending transaction events = %+v, want one pending then one processed", events)
+	}
+}
+
+func TestWageringRefund_PendingReferenceExhaustsAttemptsRejected(t *testing.T) {
+	t.Setenv("REFERENCE_WORKER_POLL_INTERVAL", "20ms")
+	t.Setenv("REFERENCE_WORKER_RETRY_BASE", "20ms")
+	t.Setenv("REFERENCE_WORKER_RETRY_MAX", "20ms")
+	t.Setenv("REFERENCE_WORKER_MAX_ATTEMPTS", "1")
+	t.Setenv("REFERENCE_WORKER_TTL", "1h")
+	h := newAppHarness(t)
+	ctx := context.Background()
+	wallet := openWalletHTTP(t, h, "100.00")
+	resp, body := doReversal(t, h, providerAToken(t), wallet, "REFUND", uniqueID("round"), "30.00", uniqueID("missing"))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("pending refund status = %d, want 202, body = %s", resp.StatusCode, body)
+	}
+	pending := decodeWageringResponse(t, body)
+	deadline := time.Now().Add(5 * time.Second)
+	var status, failureCode string
+	for time.Now().Before(deadline) {
+		requireNoError(t, h.pool.QueryRow(ctx, `SELECT status, COALESCE(failure_code, '') FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&status, &failureCode), "read attempt-exhausted pending refund")
+		if status == "REJECTED" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if status != "REJECTED" || failureCode != "REFERENCE_NOT_FOUND" {
+		t.Fatalf("attempt-exhausted pending = %s/%s, want REJECTED/REFERENCE_NOT_FOUND", status, failureCode)
+	}
+}
+
+func TestPendingReferenceAtExhaustionStillProcessesArrivedBet(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		exhaustSQL string
+	}{
+		{name: "attempt limit", exhaustSQL: `UPDATE wager_transactions SET attempts = 1, next_attempt_at = now() WHERE id = $1`},
+		{name: "ttl", exhaustSQL: `UPDATE wager_transactions SET pending_expires_at = now() - interval '1 second', next_attempt_at = now() WHERE id = $1`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("REFERENCE_WORKER_ENABLED", "false")
+			t.Setenv("REFERENCE_WORKER_MAX_ATTEMPTS", "1")
+			h := newAppHarness(t)
+			ctx := context.Background()
+			wallet := openWalletHTTP(t, h, "100.00")
+			round, betExternalID := uniqueID("round"), uniqueID("bet")
+			response, body := doReversal(t, h, providerAToken(t), wallet, "REFUND", round, "30.00", betExternalID)
+			if response.StatusCode != http.StatusAccepted {
+				t.Fatalf("pending REFUND status = %d, want 202, body = %s", response.StatusCode, body)
+			}
+			pending := decodeWageringResponse(t, body)
+			if pending.PendingExpiresAt == nil {
+				t.Fatal("202 pendingExpiresAt = nil, want stored PostgreSQL value")
+			}
+			var storedExpiry time.Time
+			requireNoError(t, h.pool.QueryRow(ctx, `SELECT pending_expires_at FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&storedExpiry), "read persisted pending expiry")
+			if !storedExpiry.UTC().Truncate(time.Second).Equal(pending.PendingExpiresAt.UTC().Truncate(time.Second)) {
+				t.Fatalf("202 pendingExpiresAt = %s, want stored PostgreSQL value %s", pending.PendingExpiresAt, storedExpiry)
+			}
+			_, err := h.pool.Exec(ctx, tt.exhaustSQL, pending.TransactionID)
+			requireNoError(t, err, "exhaust pending before resumption")
+
+			betResponse, betBody := doWagering(t, h, providerAToken(t), wageringBodyInput{ProviderID: "provider-a", ExternalID: betExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: round, GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency}, "idem-"+uniqueID("key"), "")
+			if betResponse.StatusCode != http.StatusOK {
+				t.Fatalf("BET status = %d, want 200, body = %s", betResponse.StatusCode, betBody)
+			}
+			if err := h.worker.ProcessBatch(ctx); err != nil {
+				t.Fatalf("ProcessBatch() error = %v", err)
+			}
+
+			var status string
+			requireNoError(t, h.pool.QueryRow(ctx, `SELECT status FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&status), "read resumed pending")
+			if status != "PROCESSED" {
+				t.Fatalf("pending status = %s, want PROCESSED", status)
+			}
+			if balance, _, found := queryWalletRow(t, ctx, h, wallet.ID); !found || balance != 10000 {
+				t.Errorf("wallet balance = %d (found %v), want 10000", balance, found)
+			}
+			if entries := countLedgerEntries(t, ctx, h, wallet.ID); entries != 3 {
+				t.Errorf("ledger entries = %d, want 3", entries)
+			}
+			events := queryOutboxEvents(t, ctx, h, pending.TransactionID)
+			if len(events) != 2 {
+				t.Fatalf("pending events = %+v, want pending and processed", events)
+			}
+			var event eventEnvelopeJSON
+			requireNoError(t, json.Unmarshal(events[1].payload, &event), "decode worker event")
+			if event.CorrelationID != pending.TransactionID || event.CausationID != pending.TransactionID {
+				t.Errorf("worker event correlation/causation = %q/%q, want %q/%q", event.CorrelationID, event.CausationID, pending.TransactionID, pending.TransactionID)
+			}
+		})
+	}
+}
+
+func TestWageringPendingReferenceKindsBeforeBetCompleteByHTTP(t *testing.T) {
+	for _, kind := range []string{"REFUND", "ROLLBACK", "WIN"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("REFERENCE_WORKER_POLL_INTERVAL", "20ms")
+			h := newAppHarness(t)
+			ctx := context.Background()
+			wallet := openWalletHTTP(t, h, "100.00")
+			round, betExternalID := uniqueID("round"), uniqueID("bet")
+			resp, body := doReversal(t, h, providerAToken(t), wallet, kind, round, "30.00", betExternalID)
+			if resp.StatusCode != http.StatusAccepted {
+				t.Fatalf("pending %s status = %d, want 202, body = %s", kind, resp.StatusCode, body)
+			}
+			pending := decodeWageringResponse(t, body)
+			betResp, betBody := doWagering(t, h, providerAToken(t), wageringBodyInput{ProviderID: "provider-a", ExternalID: betExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: round, GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency}, "idem-"+uniqueID("key"), "")
+			if betResp.StatusCode != http.StatusOK {
+				t.Fatalf("BET status = %d, want 200, body = %s", betResp.StatusCode, betBody)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			var status string
+			for time.Now().Before(deadline) {
+				requireNoError(t, h.pool.QueryRow(ctx, `SELECT status FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&status), "read pending operation")
+				if status == "PROCESSED" {
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if status != "PROCESSED" {
+				t.Fatalf("pending %s status = %s, want PROCESSED", kind, status)
+			}
+			if balance, _, found := queryWalletRow(t, ctx, h, wallet.ID); !found || balance != 10000 {
+				t.Errorf("%s wallet balance = %d (found %v), want 10000", kind, balance, found)
+			}
+		})
+	}
+}
+
+func TestWageringPendingReference_RejectedReferenceIsRejectedNotProcessed(t *testing.T) {
+	t.Setenv("REFERENCE_WORKER_POLL_INTERVAL", "20ms")
+	h := newAppHarness(t)
+	ctx := context.Background()
+	wallet := openWalletHTTP(t, h, "100.00")
+	round, betExternalID := uniqueID("round"), uniqueID("bet")
+	resp, body := doReversal(t, h, providerAToken(t), wallet, "REFUND", round, "200.00", betExternalID)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("pending REFUND status = %d, want 202, body = %s", resp.StatusCode, body)
+	}
+	pending := decodeWageringResponse(t, body)
+	betResp, betBody := doWagering(t, h, providerAToken(t), wageringBodyInput{ProviderID: "provider-a", ExternalID: betExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: round, GameID: "game-1", Kind: "BET", Amount: "200.00", Currency: testCurrency}, "idem-"+uniqueID("key"), "")
+	if betResp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("rejected BET status = %d, want 422, body = %s", betResp.StatusCode, betBody)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var status, failureCode string
+	for time.Now().Before(deadline) {
+		requireNoError(t, h.pool.QueryRow(ctx, `SELECT status, COALESCE(failure_code, '') FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&status, &failureCode), "read pending rejection")
+		if status == "REJECTED" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if status != "REJECTED" || failureCode != "REFERENCE_NOT_PROCESSED" {
+		t.Fatalf("pending after rejected reference = %s/%s, want REJECTED/REFERENCE_NOT_PROCESSED", status, failureCode)
+	}
+}
+
+func TestReferenceWorker_StopCompletesFxComposition(t *testing.T) {
+	t.Setenv("REFERENCE_WORKER_POLL_INTERVAL", "100ms")
+	t.Setenv("REFERENCE_WORKER_LEASE", "150ms")
+	h := newAppHarness(t)
+	ctx := context.Background()
+	wallet := openWalletHTTP(t, h, "100.00")
+	round, betExternalID := uniqueID("round"), uniqueID("bet")
+	response, body := doReversal(t, h, providerAToken(t), wallet, "REFUND", round, "30.00", betExternalID)
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("pending REFUND status = %d, want 202, body = %s", response.StatusCode, body)
+	}
+	pending := decodeWageringResponse(t, body)
+	lock := connectApp(t, ctx)
+	lockTx, err := lock.Begin(ctx)
+	requireNoError(t, err, "begin controlled wallet lock")
+	requireNoError(t, lockTx.QueryRow(ctx, `SELECT id FROM wallets WHERE id = $1 FOR UPDATE`, wallet.ID).Scan(new(string)), "lock wallet while worker resumes")
+	deadline := time.Now().Add(2 * time.Second)
+	claimed := false
+	for time.Now().Before(deadline) {
+		requireNoError(t, h.pool.QueryRow(ctx, `SELECT next_attempt_at > now() FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&claimed), "observe worker claim")
+		if claimed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !claimed {
+		t.Fatal("worker did not claim the pending operation while its wallet lock was held")
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := h.stop(t, stopCtx); err != nil {
+		t.Fatalf("Fx stop with reference worker polling = %v", err)
+	}
+	requireNoError(t, lockTx.Rollback(context.Background()), "release controlled wallet lock")
+	var status string
+	requireNoError(t, lock.QueryRow(ctx, `SELECT status FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&status), "read stopped pending")
+	if status != "PENDING_REFERENCE" {
+		t.Errorf("pending status after stop = %s, want PENDING_REFERENCE", status)
+	}
+	var entries int
+	requireNoError(t, lock.QueryRow(ctx, `SELECT count(*) FROM wallet_ledger_entries WHERE wallet_id = $1`, wallet.ID).Scan(&entries), "count ledger after stop")
+	if entries != 1 {
+		t.Errorf("ledger entries after stop = %d, want only opening", entries)
+	}
+	var balance int64
+	requireNoError(t, lock.QueryRow(ctx, `SELECT balance FROM wallets WHERE id = $1`, wallet.ID).Scan(&balance), "read wallet after stop")
+	if balance != 10000 {
+		t.Errorf("wallet balance after stop = %d, want 10000", balance)
+	}
+	time.Sleep(200 * time.Millisecond)
+	var eligible bool
+	requireNoError(t, lock.QueryRow(ctx, `SELECT next_attempt_at <= now() FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&eligible), "read pending eligibility after lease")
+	if !eligible {
+		t.Error("pending did not become eligible after its lease")
 	}
 }
 

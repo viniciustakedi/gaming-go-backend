@@ -16,6 +16,8 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/outboxpg"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/pg"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/queue"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/referenceworker"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/referenceworkerpg"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/wageringmetrics"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletpg"
 )
@@ -36,6 +38,8 @@ var Modules = fx.Options(
 	consumer.Module,
 	outboxpg.Module,
 	outbox.Module,
+	referenceworkerpg.Module,
+	referenceworker.Module,
 	httpapi.Module,
 )
 
