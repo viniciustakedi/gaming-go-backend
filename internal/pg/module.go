@@ -18,11 +18,13 @@ func readinessCheck(pool *pgxpool.Pool) health.Named {
 	}
 }
 
-// Module provides the *pgxpool.Pool, registers its start/stop lifecycle and
-// contributes a readiness Check to the "readiness" value group that
+// Module provides the *pgxpool.Pool and the *UnitOfWork every wallet
+// repository is called through, registers the pool's start/stop lifecycle
+// and contributes a readiness Check to the "readiness" value group that
 // internal/httpapi fans out over on every /health/ready request.
 var Module = fx.Module("postgres",
 	fx.Provide(New),
+	fx.Provide(NewUnitOfWork),
 	fx.Provide(
 		fx.Annotate(
 			readinessCheck,

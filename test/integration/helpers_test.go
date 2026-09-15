@@ -8,13 +8,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/envfile"
 )
 
 const defaultOwnerDSN = "postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable"
@@ -64,6 +68,54 @@ func appDSN(t *testing.T) string {
 	return u.String()
 }
 
+// appConfigEnv derives the credential-free DATABASE_HOST/DATABASE_PORT/
+// DATABASE_NAME/DATABASE_SSLMODE config.Load reads for the process under
+// test from ownerDSN's own host, port, database and sslmode - mirroring
+// exactly what docker-compose.yml's app service receives, with the
+// migration owner's credentials stripped out (see internal/config.Load and
+// README.md, "Credenciais do Postgres"). ownerDSN itself is never handed to
+// config.Load: only used here to source the non-secret parts, and directly
+// by this package's own owner-privileged assertions.
+func appConfigEnv(t *testing.T) map[string]string {
+	t.Helper()
+	u, err := url.Parse(ownerDSN(t))
+	if err != nil {
+		t.Fatalf("parse DATABASE_URL: %v", err)
+	}
+	port := u.Port()
+	if port == "" {
+		port = "5432"
+	}
+	sslmode := u.Query().Get("sslmode")
+	if sslmode == "" {
+		sslmode = "disable"
+	}
+	return map[string]string{
+		"DATABASE_HOST":    u.Hostname(),
+		"DATABASE_PORT":    port,
+		"DATABASE_NAME":    strings.TrimPrefix(u.Path, "/"),
+		"DATABASE_SSLMODE": sslmode,
+	}
+}
+
+// readEnvFile reads path with envfile.Read, this package's shared credential
+// parser (also used by internal/pg in production). envfile's own
+// missing-file message stays neutral for production callers; here, where a
+// missing file almost always means the stack was never brought up, the
+// helper adds the scripts/wait-for-integration.sh hint before failing the
+// test.
+func readEnvFile(t *testing.T, path string) map[string]string {
+	t.Helper()
+	values, err := envfile.Read(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("%v - run scripts/wait-for-integration.sh first", err)
+		}
+		t.Fatalf("%v", err)
+	}
+	return values
+}
+
 // walletAppPassword reads WALLET_APP_PASSWORD from
 // deploy/postgres/.runtime/credentials.env - the file
 // deploy/postgres/provision.sh writes on every `docker compose up`, the
@@ -78,11 +130,10 @@ func walletAppPassword(t *testing.T) string {
 	if path == "" {
 		path = filepath.Join("..", "..", "deploy", "postgres", ".runtime", "credentials.env")
 	}
-	values := map[string]string{}
-	readEnvFile(t, path, values)
+	values := readEnvFile(t, path)
 	password, ok := values["WALLET_APP_PASSWORD"]
 	if !ok || password == "" {
-		t.Fatalf("missing WALLET_APP_PASSWORD in %s - run `docker compose up postgres-provisioning` first, see README.md", path)
+		t.Fatalf("missing WALLET_APP_PASSWORD in %s - run scripts/wait-for-integration.sh first", path)
 	}
 	return password
 }

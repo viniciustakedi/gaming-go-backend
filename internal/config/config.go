@@ -36,9 +36,23 @@ type LogConfig struct {
 }
 
 type PostgresConfig struct {
-	DSN         string
-	PingTimeout time.Duration
-	MaxConns    int32
+	// Host, Port, Name and SSLMode carry no secret: the app process never
+	// receives the migration owner's credentials (spec/ticket 06 review:
+	// "o serviço app não recebe nenhuma credencial do papel dono"). DSN is
+	// assembled from these four alone, so it can never carry userinfo
+	// either - only migrate and postgres-provisioning are handed the
+	// owner's own DATABASE_URL, read directly from the environment, never
+	// through this struct.
+	Host               string
+	Port               string
+	Name               string
+	SSLMode            string
+	DSN                string
+	PingTimeout        time.Duration
+	MaxConns           int32
+	AppCredentialsFile string
+	LockTimeout        time.Duration
+	StatementTimeout   time.Duration
 }
 
 type SQSConfig struct {
@@ -98,12 +112,40 @@ func Load() (Config, error) {
 		errs = append(errs, fmt.Errorf("LOG_LEVEL: invalid value %q, want one of debug|info|warn|error", cfg.Log.Level))
 	}
 
-	cfg.Postgres.DSN = getEnv("DATABASE_URL", "")
-	if cfg.Postgres.DSN == "" {
-		errs = append(errs, errors.New("DATABASE_URL: required"))
+	cfg.Postgres.Host = getEnv("DATABASE_HOST", "")
+	if cfg.Postgres.Host == "" {
+		errs = append(errs, errors.New("DATABASE_HOST: required"))
+	} else if strings.Contains(cfg.Postgres.Host, "@") {
+		// The only way userinfo could ever reach the DSN this package
+		// assembles below: reject it here rather than let it flow through
+		// silently (ticket 06 review: "falhar se o app receber userinfo no
+		// DSN"). The app derives its actual connection exclusively from
+		// AppCredentialsFile - see internal/pg.AppDSN.
+		errs = append(errs, errors.New("DATABASE_HOST: must not contain credentials (userinfo); the app derives its Postgres connection only from DATABASE_APP_CREDENTIALS_FILE"))
+	}
+	cfg.Postgres.Port = getEnv("DATABASE_PORT", "5432")
+	cfg.Postgres.Name = getEnv("DATABASE_NAME", "")
+	if cfg.Postgres.Name == "" {
+		errs = append(errs, errors.New("DATABASE_NAME: required"))
+	}
+	cfg.Postgres.SSLMode = getEnv("DATABASE_SSLMODE", "disable")
+	if cfg.Postgres.Host != "" && !strings.Contains(cfg.Postgres.Host, "@") && cfg.Postgres.Name != "" {
+		cfg.Postgres.DSN = fmt.Sprintf("postgres://%s:%s/%s?sslmode=%s", cfg.Postgres.Host, cfg.Postgres.Port, cfg.Postgres.Name, cfg.Postgres.SSLMode)
 	}
 	cfg.Postgres.PingTimeout = getDuration("DATABASE_PING_TIMEOUT", 5*time.Second, &errs)
 	cfg.Postgres.MaxConns = getInt32("DATABASE_MAX_CONNS", 10, &errs)
+	// The app never receives the migration owner's credentials at all: DSN
+	// above carries no userinfo, and pg.New/pg.AppDSN adds wallet_app's
+	// least-privilege role on top of it, with the password read only from
+	// this file - generated at runtime by deploy/postgres/provision.sh,
+	// never versioned. See internal/pg.AppDSN and README.md's "Credenciais
+	// do Postgres".
+	cfg.Postgres.AppCredentialsFile = getEnv("DATABASE_APP_CREDENTIALS_FILE", "deploy/postgres/.runtime/credentials.env")
+	// Session-level GUCs (spec: "As sessões Postgres usam lock_timeout e
+	// statement_timeout, e estourar qualquer um deles é falha transitória"),
+	// applied per-connection by pg.New through pgx's RuntimeParams.
+	cfg.Postgres.LockTimeout = getDuration("DATABASE_LOCK_TIMEOUT", 3*time.Second, &errs)
+	cfg.Postgres.StatementTimeout = getDuration("DATABASE_STATEMENT_TIMEOUT", 5*time.Second, &errs)
 
 	cfg.SQS.EndpointURL = getEnv("SQS_ENDPOINT_URL", "")
 	if cfg.SQS.EndpointURL == "" {

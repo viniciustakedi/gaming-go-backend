@@ -104,10 +104,37 @@ Idempotente como `provisioning`: se o arquivo de credenciais já existe, a
 senha é lida dele e reaplicada com o mesmo `ALTER ROLE`, em vez de gerar
 uma nova - por isso `docker compose stop && docker compose up --build`
 mantém a mesma senha. `test/integration` lê esse arquivo para conectar como
-`wallet_app` (ver `walletAppPassword` em `test/integration/helpers_test.go`);
-nenhum container de aplicação o monta - o processo `serve` continua usando
-`DATABASE_URL` (o papel dono) até o ticket que introduz os repositórios
-pgx, que é quem troca isso para `wallet_app` de verdade.
+`wallet_app` (ver `walletAppPassword` em `test/integration/helpers_test.go`).
+
+O processo `serve` também lê esse arquivo, mas nunca recebe nem conecta com
+a credencial do papel dono: ele não lê `DATABASE_URL` de jeito nenhum, só
+`DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME` e `DATABASE_SSLMODE` -
+nenhum segredo. `internal/config.Load` monta o DSN a partir só desses
+quatro (e falha se `DATABASE_HOST` contiver `@`, sinal de userinfo
+embutido); `internal/pg.New`/`AppDSN` adiciona por cima as credenciais de
+`wallet_app`, lidas de `DATABASE_APP_CREDENTIALS_FILE` (padrão
+`deploy/postgres/.runtime/credentials.env`; no Compose, o serviço `app`
+monta esse arquivo em `/shared/postgres-credentials.env` e aponta a
+variável para lá - ver `docker-compose.yml`). `docker compose exec app env`
+nunca mostra a senha do dono, porque ela nunca chega a esse container.
+`DATABASE_URL`, com a credencial do dono, continua existindo só para
+`migrate` e `postgres-provisioning`.
+
+## Contratos HTTP implementados
+
+- `POST /wallets` - abre a carteira de um jogador numa moeda. Corpo:
+  `{"playerId": "<uuid>", "initialBalance": {"amount": "100.00", "currency": "BRL"}}`.
+  `201` com `id`, `playerId`, `balance` e `version`; `409
+  WALLET_ALREADY_EXISTS` para o mesmo par jogador/moeda; `400` com um
+  código estável (`INVALID_REQUEST`, `INVALID_MONEY`,
+  `UNSUPPORTED_CURRENCY`) para entrada inválida, sem persistir nada; `503`
+  com `Retry-After` numa falha transitória do banco, também sem persistir
+  nada.
+- `GET /wallets/{walletId}` - `200` com `id`, `playerId`, `balance` e
+  `version`, ou `404` se a carteira não existe.
+
+Sem autenticação por enquanto (ticket 07 protege `/wallets*` com o papel
+`wallet-admin`) - não expor esses endpoints fora do ambiente local.
 
 ### Fixtures de teste de IAM
 
@@ -155,24 +182,36 @@ go vet ./...
 go test -race ./...
 ```
 
-Testes de integração (tag `integration`) precisam da infraestrutura no ar:
+Testes de integração (tag `integration`) precisam da infraestrutura no ar.
+`docker compose up -d` sozinho não espera os one-shots (`provisioning`,
+`postgres-provisioning`, `migrate`) terminarem - ele volta assim que os
+containers começam a rodar, e ler os arquivos de credenciais nesse instante
+pode pegar um arquivo de uma subida anterior ou ainda incompleto.
+`scripts/wait-for-integration.sh` resolve isso: sobe `postgres` e `ministack`
+com `docker compose up -d --wait` (aguardando os dois saudáveis) e roda cada
+one-shot com `docker compose run --rm` em sequência - o que bloqueia até cada
+um terminar e aborta o script (`set -euo pipefail`) no primeiro que sair com
+código diferente de zero. O script não imprime nada em stdout e não lê nem
+exporta nenhuma credencial - é só uma sequência de comandos do Compose:
 
 ```sh
-docker compose up -d postgres ministack provisioning postgres-provisioning migrate
-
-export DATABASE_URL="postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable"
-export SQS_ENDPOINT_URL="http://localhost:4566"
-export $(grep -v '^#' deploy/ministack/.runtime/app-credentials.env | xargs)
-
-go test -race -tags integration ./...
+scripts/wait-for-integration.sh && go test -race -tags integration -count=1 ./...
 ```
 
-`test/integration` lê `deploy/ministack/.runtime/test-credentials.env` e
+Como o `&&` só roda `go test` se o script terminar com sucesso, um one-shot
+que falhar aborta o fluxo inteiro com o código de saída do Compose, sem
+rodar a suíte com infraestrutura incompleta ou credenciais de uma execução
+anterior.
+
+`test/integration` e `internal/app` leem `deploy/ministack/.runtime/app-credentials.env`,
+`deploy/ministack/.runtime/test-credentials.env` e
 `deploy/postgres/.runtime/credentials.env` diretamente (path default, ou
-`TEST_CREDENTIALS_FILE`/`POSTGRES_CREDENTIALS_FILE` para apontar para outro
-lugar) - não precisa exportar essas variáveis, só os arquivos precisam
-existir, o que os passos `docker compose up ... provisioning` e
-`... postgres-provisioning` acima já garantem.
+`APP_CREDENTIALS_FILE`/`TEST_CREDENTIALS_FILE`/`POSTGRES_CREDENTIALS_FILE`
+para apontar para outro lugar) - nenhuma variável `SQS_*` ou de senha precisa
+estar no ambiente, só os arquivos precisam existir, o que
+`scripts/wait-for-integration.sh` já garante ao esperar `provisioning` e
+`postgres-provisioning` terminarem antes de retornar. Se um arquivo não
+existir, o teste falha pedindo para rodar `scripts/wait-for-integration.sh`.
 
 - `internal/app`: composição Fx completa via `fxtest` - start/stop
   liberando recursos, e start falhando com config inválida.
@@ -180,11 +219,21 @@ existir, o que os passos `docker compose up ... provisioning` e
   falha nunca chega a abrir o listener HTTP, e a porta continua livre para
   uma nova tentativa - reproduzido com um `fxtest.Lifecycle` isolado, sem
   precisar de Postgres nem MiniStack reais.
+- `internal/walletapp`: os casos de uso de abertura e leitura de carteira,
+  com repositórios e unidade de trabalho falsos - abertura com saldo
+  positivo grava transação, ledger e os dois eventos de outbox; saldo zero
+  não grava nada além da carteira; conflito e falha de escrita não
+  reconhecida são classificados corretamente.
 - `test/integration`: as políticas IAM contra o MiniStack real - acesso por
   ação e por ARN (incluindo o ciclo completo de `DeleteMessage` do
   events-reader), chave desconhecida rejeitada, Deny explícito vencendo
   Allow (fixture `deny-probe`), e redrive para a DLQ (fixture
-  `redrive-tester`) - ver "Fixtures de teste de IAM" acima.
+  `redrive-tester`) - ver "Fixtures de teste de IAM" acima. Também o
+  contrato HTTP de `POST /wallets` e `GET /wallets/{walletId}` (seam 3a),
+  via a aplicação Fx completa subida com `fxtest` numa porta livre
+  (`appHarness`, em `apphttp_test.go`) - saldo positivo e zero, conflito,
+  aberturas concorrentes, entrada inválida, leitura e falha transitória do
+  banco por `lock_timeout`, com asserções no banco para ledger e outbox.
 
 ## Idempotência e segundo `docker compose up`
 

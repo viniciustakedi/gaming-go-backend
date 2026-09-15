@@ -17,6 +17,7 @@ import (
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/config"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/health"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletapp"
 )
 
 // ReadinessChecks is an fx.In struct that collects every Check contributed
@@ -48,13 +49,16 @@ func (s *Server) Addr() string {
 	return s.Listener.Addr().String()
 }
 
-func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessChecks) (*Server, error) {
+func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessChecks, logger *slog.Logger, openWallet *walletapp.OpenWalletUseCase, getWallet *walletapp.GetWalletUseCase) (*Server, error) {
 	readiness := NewReadiness(checks.Checks, cfg.HTTP.ReadinessTimeout)
+	latency := newHTTPLatency(registry)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /health/live", liveHandler())
 	mux.Handle("GET /health/ready", readyHandler(readiness))
 	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{Registry: registry}))
+	mux.Handle("POST /wallets", latency.wrap("POST /wallets", openWalletHandler(openWallet, logger)))
+	mux.Handle("GET /wallets/{walletId}", latency.wrap("GET /wallets/{walletId}", getWalletHandler(getWallet, logger)))
 
 	return &Server{
 		HTTP: &http.Server{

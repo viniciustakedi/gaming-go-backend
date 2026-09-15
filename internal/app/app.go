@@ -12,6 +12,7 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/metrics"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/pg"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/queue"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletpg"
 )
 
 // Modules lists every Fx module the service composes, in the order a human
@@ -24,6 +25,7 @@ var Modules = fx.Options(
 	metrics.Module,
 	pg.Module,
 	queue.Module,
+	walletpg.Module,
 	httpapi.Module,
 )
 
