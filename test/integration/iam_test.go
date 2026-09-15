@@ -469,12 +469,14 @@ func TestIAM_RedriveToDLQ(t *testing.T) {
 
 	deadline := time.Now().Add(30 * time.Second)
 	for attempt := 0; attempt < rc.redriveMaxReceiveCount+3 && time.Now().Before(deadline); attempt++ {
-		_, _ = redriveTester.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+		if _, err := redriveTester.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(inURL),
 			MaxNumberOfMessages: 10,
 			VisibilityTimeout:   1,
 			WaitTimeSeconds:     2,
-		})
+		}); err != nil {
+			t.Fatalf("receive message (attempt %d): %v", attempt, err)
+		}
 		time.Sleep(1500 * time.Millisecond)
 	}
 
