@@ -12,8 +12,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "==> subindo postgres e ministack (aguardando saudáveis)" >&2
-docker compose up -d --wait postgres ministack 1>&2
+echo "==> subindo postgres, ministack e keycloak (aguardando saudáveis)" >&2
+docker compose up -d --wait postgres ministack keycloak 1>&2
+
+echo "==> aguardando o realm 'wallet' importado no keycloak" >&2
+docker compose run --rm keycloak-wait 1>&2
 
 echo "==> provisionando o papel wallet_app no postgres" >&2
 docker compose run --rm postgres-provisioning 1>&2

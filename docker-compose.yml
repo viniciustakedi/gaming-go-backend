@@ -34,6 +34,67 @@ services:
     ports:
       - "${MINISTACK_PORT:-4566}:4566"
 
+  # Realm import happens automatically on boot via --import-realm - no
+  # provisioning one-shot needed, unlike ministack/postgres above, and no
+  # admin bootstrap either: neither KC_BOOTSTRAP_ADMIN_* nor the legacy
+  # KEYCLOAK_ADMIN/KEYCLOAK_ADMIN_PASSWORD are set, so this Keycloak boots
+  # with no master-realm admin account at all (security review: a reachable
+  # Admin Console with the well-known admin/admin credential could mint a
+  # wallet-admin token for anyone who reaches this port). Nothing in this
+  # repository needs it: every client, role, mapper and claim the wallet
+  # realm needs is declared statically in realm-wallet.json and created by
+  # --import-realm itself - the app and every test authenticate exclusively
+  # via client_credentials against clients that file already defines,
+  # including provider-a-short-lived's 2-second token lifespan (a static
+  # `attributes.access.token.lifespan`, not an Admin API call). Bound to
+  # 127.0.0.1 for the same reason Postgres is above: this is a realm
+  # imported fresh on every `docker compose up`, never a shared or
+  # long-lived Keycloak instance, but a reachable Admin Console would still
+  # let an attacker on the host revoke roles or rotate client secrets. See
+  # "Autenticação e autorização" in README.md for KC_HOSTNAME/
+  # KC_HOSTNAME_BACKCHANNEL_DYNAMIC below, which make the token's own "iss"
+  # identical for every caller regardless of which of these two addresses
+  # reached Keycloak.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      # KC_HOSTNAME fixes the issuer/frontend URL to the address a host
+      # process (curl, test/integration) uses; KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+      # lets the token/JWKS endpoints Keycloak advertises still resolve
+      # dynamically per the Host header a caller used, so the app container
+      # (internal Compose network) keeps reaching them at
+      # http://keycloak:8080/... while every caller's token still carries
+      # the exact same "iss" (ticket 07 review: "o iss do token reflete o
+      # host usado para buscá-lo").
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_PORT:-8081}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8081}:8080"
+    volumes:
+      - ./deploy/keycloak/realm-wallet.json:/opt/keycloak/data/import/realm-wallet.json:ro
+
+  # One-shot: blocks until Keycloak's OIDC discovery endpoint answers 200.
+  # Unlike postgres/ministack above, keycloak has no Compose healthcheck -
+  # the quay.io image ships neither curl nor wget, so it cannot run a
+  # CMD-SHELL probe the way pg_isready does - so
+  # scripts/wait-for-integration.sh runs this instead, to know the realm
+  # import has actually finished before test/integration starts fetching
+  # client_credentials tokens.
+  keycloak-wait:
+    image: curlimages/curl:8.11.0
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for i in $(seq 1 60); do
+          curl -sf http://keycloak:8080/realms/wallet/.well-known/openid-configuration > /dev/null && exit 0
+          sleep 1
+        done
+        echo "keycloak did not become ready in time" >&2
+        exit 1
+    depends_on:
+      - keycloak
+
   # One-shot: creates the queues, the DLQ redrive, the four least-privilege
   # IAM users (gateway, consumer, publisher, events-reader) and the IAM test
   # fixtures (deny-probe, redrive-tester - see provision.sh), then writes
@@ -131,6 +192,27 @@ services:
       SQS_DLQ_QUEUE_NAME: ${SQS_DLQ_QUEUE_NAME:-wager-transactions-dlq.fifo}
       SQS_OUTPUT_QUEUE_NAME: ${SQS_OUTPUT_QUEUE_NAME:-wallet-events.fifo}
       IAM_CREDENTIALS_FILE: /shared/app-credentials.env
+      # Keycloak's own boot (including the realm import above) routinely
+      # takes longer than Postgres or MiniStack, and depends_on below can
+      # only wait for the container to start, not for Keycloak to actually
+      # be ready - AUTH_DISCOVERY_TIMEOUT's generous default (see
+      # internal/config) is what makes internal/auth's own retry loop
+      # absorb the rest of that wait (ticket 07: "Descoberta OIDC no start
+      # hook, com retry limitado ao prazo de start").
+      #
+      # AUTH_ISSUER_URL is the public address (keycloak's KC_HOSTNAME above)
+      # every token's own "iss" claim carries, regardless of who requested
+      # it - this is what internal/auth validates a token against, and it
+      # must be the exact address a host-side caller (curl, the README's own
+      # flow) uses too. AUTH_DISCOVERY_URL is only where this container
+      # fetches Keycloak's OIDC configuration and JWKS from - the app can
+      # never reach AUTH_ISSUER_URL's host-facing address from inside the
+      # Compose network, only keycloak:8080 - and is never compared against
+      # a token's "iss" (internal/auth.discoverWithRetry; ticket 07: "separe
+      # issuer esperado de URL de descoberta e JWKS").
+      AUTH_ISSUER_URL: http://localhost:${KEYCLOAK_PORT:-8081}/realms/wallet
+      AUTH_DISCOVERY_URL: http://keycloak:8080/realms/wallet
+      AUTH_AUDIENCE: ${AUTH_AUDIENCE:-wallet-api}
       # SQS_CONSUMER_ACCESS_KEY_ID, SQS_CONSUMER_SECRET_ACCESS_KEY,
       # SQS_PUBLISHER_ACCESS_KEY_ID and SQS_PUBLISHER_SECRET_ACCESS_KEY are
       # deliberately not set here: deploy/docker/entrypoint.sh sources them
@@ -155,3 +237,5 @@ services:
         condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
+      keycloak:
+        condition: service_started
