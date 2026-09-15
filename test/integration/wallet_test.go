@@ -21,6 +21,7 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/pg"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletapp"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletpg"
+	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
 // seam 3a - internal/app + internal/httpapi's real HTTP contract for
@@ -28,25 +29,12 @@ import (
 // (apphttp_test.go) against the same Postgres and MiniStack every other
 // test in this package uses.
 
-type walletHTTPResponse struct {
-	ID       string `json:"id"`
-	PlayerID string `json:"playerId"`
-	Balance  struct {
-		Amount   string `json:"amount"`
-		Currency string `json:"currency"`
-	} `json:"balance"`
-	Version int64 `json:"version"`
-}
+// walletHTTPResponse and moneyJSON are test/testclient's shared DTOs (spec,
+// seam 3: "o mesmo cliente de teste roda em dois harnesses") -
+// test/multiinstance uses the same types.
+type walletHTTPResponse = testclient.WalletHTTPResponse
 
-// moneyJSON mirrors internal/domain/money.Money's own external contract
-// (amount as a canonical decimal string, currency as its ISO code) - the
-// independent source of truth every assertion below compares against is
-// hand-written expected values, never a value recomputed the way the
-// production code itself computes it.
-type moneyJSON struct {
-	Amount   string `json:"amount"`
-	Currency string `json:"currency"`
-}
+type moneyJSON = testclient.MoneyJSON
 
 // eventEnvelopeJSON mirrors internal/domain/wallet.eventEnvelope, the
 // shared envelope every outbox payload in this package carries.
@@ -139,21 +127,12 @@ type errorHTTPResponse struct {
 }
 
 func openWalletBody(playerID, amount, currency string) []byte {
-	body, err := json.Marshal(map[string]any{
-		"playerId":       playerID,
-		"initialBalance": map[string]string{"amount": amount, "currency": currency},
-	})
-	if err != nil {
-		panic(err)
-	}
-	return body
+	return testclient.OpenWalletBody(playerID, amount, currency)
 }
 
 func decodeWalletResponse(t *testing.T, body []byte) walletHTTPResponse {
 	t.Helper()
-	var resp walletHTTPResponse
-	requireNoError(t, json.Unmarshal(body, &resp), "decode wallet response: "+string(body))
-	return resp
+	return testclient.DecodeWalletResponse(t, body)
 }
 
 func decodeErrorResponse(t *testing.T, body []byte) errorHTTPResponse {

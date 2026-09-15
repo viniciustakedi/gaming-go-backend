@@ -389,6 +389,87 @@ existir, o teste falha pedindo para rodar `scripts/wait-for-integration.sh`.
   `provider` em `/wallets` devolvendo `403` (em POST e em GET); `wallet-admin`
   passando; nenhum desses casos negados cria carteira.
 
+## Injeção de falhas
+
+`internal/faultinject.Trigger(point string)` é o único ponto de entrada do
+mecanismo. Compilado sem a build tag `faultinject` (todo `go build`/`go test`
+normal, incluindo os comandos acima), é um no-op puro - nenhuma variável de
+ambiente é lida, nenhum ponto existe no binário produzido. Compilado com
+`-tags faultinject`, ele compara `point` com a variável de ambiente
+`FAULT_INJECT_POINT` e, se baterem, encerra o processo com `SIGKILL` contra
+si mesmo - abrupto, incapturável, sem rollback nem handler de `SIGTERM`, para
+que os testes de recuperação provem uma queda real, não um desligamento
+gracioso. `internal/faultinject/faultinject_test.go` confirma o no-op mesmo
+com `FAULT_INJECT_POINT` definida, no build sem a tag.
+
+Este ticket entrega só o mecanismo - nenhuma chamada a `Trigger` existe
+ainda em `internal/wagering`, `internal/outbox` ou no consumidor SQS. O
+ticket 16 adiciona os pontos nomeados do desenho (antes do commit, depois do
+commit e antes do `DeleteMessage`, depois do commit do `PENDING_REFERENCE`,
+depois do envio da outbox e antes da confirmação, depois do claim da outbox
+e antes do envio - spec, "Injeção de falhas e ambiente") e os testes que
+efetivamente definem `FAULT_INJECT_POINT` num processo do harness abaixo.
+
+## Múltiplas instâncias
+
+### Perfil do Compose
+
+O perfil `multi` sobe três instâncias do serviço, cada uma na sua própria
+porta, contra o mesmo Postgres, MiniStack e Keycloak - nunca uma cópia
+isolada por instância, para que disputem de fato as mesmas carteiras:
+
+```sh
+docker compose --profile multi up -d --build app-1 app-2 app-3
+```
+
+Nomear os três serviços explicitamente limita o `up` a eles e às suas
+próprias dependências (Postgres, MiniStack, Keycloak, migrations e os
+one-shots de provisionamento) - o serviço `app` de instância única não sobe
+junto. Portas padrão: `HTTP_PORT_1` (8091), `HTTP_PORT_2` (8092),
+`HTTP_PORT_3` (8093) - substituíveis do mesmo jeito que `HTTP_PORT` (ver
+`.env.example`). Verificação:
+
+```sh
+curl http://localhost:8091/health/ready
+curl http://localhost:8092/health/ready
+curl http://localhost:8093/health/ready
+```
+
+`docker compose --profile multi stop app-1 app-2 app-3` derruba as três sem
+mexer no restante da infraestrutura.
+
+### Harness de teste (seam 3b)
+
+`test/multiinstance` (build tag `multiinstance`, separada de `integration`
+porque é bem mais lenta: compila o binário com `-race -tags faultinject` e
+sobe três processos reais do sistema operacional por teste, em vez de um
+`fxtest` em processo) prova o mesmo resultado financeiro com três processos
+independentes - cada um com suas próprias conexões e sua própria memória -
+disputando as mesmas carteiras sobre a infraestrutura real. O banco só é
+lido para asserções (`countLedgerEntries`, `netLedgerBalance`), nunca para
+conduzir o cenário.
+
+Precisa da mesma infraestrutura de `test/integration` no ar (Postgres,
+MiniStack, Keycloak - não do Compose `app`/`app-1..3` em si, o harness sobe
+os processos ele mesmo):
+
+```sh
+scripts/wait-for-integration.sh
+go test -race -tags multiinstance -timeout 10m -count=1 ./test/multiinstance/...
+```
+
+Cobre: 80.00 + 80.00 sobre uma carteira de 100.00, cada `BET` numa instância
+diferente, resultando em uma `PROCESSED`, uma `INSUFFICIENT_FUNDS`, saldo
+`"20.00"` e um único débito; a mesma aposta enviada 50 vezes distribuída
+entre as três instâncias, com um único débito; carteiras distintas
+processadas em paralelo em instâncias diferentes; e as três instâncias
+mortas com `SIGKILL` e reiniciadas, com o reenvio da mesma operação
+devolvendo o resultado original (`idempotentReplay: true`) e o saldo
+conferido contra o ledger. Cada teste encerra suas próprias instâncias com
+`SIGTERM` ao final (ou, no cenário de reinício, já as matou) e falha se o
+log combinado (stdout/stderr) de qualquer uma contiver um relatório do race
+detector (`WARNING: DATA RACE`).
+
 ## Idempotência e segundo `docker compose up`
 
 `docker compose stop && docker compose up --build` reaproveita o que já

@@ -25,8 +25,8 @@ func mustBetHTTP(t *testing.T, h *appHarness, token string, wallet walletHTTPRes
 	t.Helper()
 	externalID = uniqueID("ext")
 	resp, body := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: externalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: roundID, gameID: "game-1", kind: "BET", amount: amount, currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: externalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: roundID, GameID: "game-1", Kind: "BET", Amount: amount, Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup BET status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -39,8 +39,8 @@ func mustWinHTTP(t *testing.T, h *appHarness, token string, wallet walletHTTPRes
 	t.Helper()
 	externalID = uniqueID("ext")
 	resp, body := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: externalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: roundID, gameID: "game-1", kind: "WIN", amount: amount, currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: externalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: roundID, GameID: "game-1", Kind: "WIN", Amount: amount, Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup WIN status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -55,8 +55,8 @@ func doReversal(t *testing.T, h *appHarness, token string, wallet walletHTTPResp
 	t.Helper()
 	ref := referenceID
 	return doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: roundID, gameID: "game-1", kind: kind, amount: amount, currency: testCurrency, referenceID: &ref,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: roundID, GameID: "game-1", Kind: kind, Amount: amount, Currency: testCurrency, ReferenceID: &ref,
 	}, "idem-"+uniqueID("k"), "")
 }
 
@@ -182,8 +182,8 @@ func TestWageringRollback_OfRefund_DebitsAndBlocksNewRefund(t *testing.T) {
 
 	refundExternalID := uniqueID("ext")
 	refundResp, refundBody := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: refundExternalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: round, gameID: "game-1", kind: "REFUND", amount: "30.00", currency: testCurrency, referenceID: &betExternalID,
+		ProviderID: "provider-a", ExternalID: refundExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: round, GameID: "game-1", Kind: "REFUND", Amount: "30.00", Currency: testCurrency, ReferenceID: &betExternalID,
 	}, "idem-"+uniqueID("k"), "")
 	if refundResp.StatusCode != http.StatusOK {
 		t.Fatalf("REFUND status = %d, want 200, body = %s", refundResp.StatusCode, refundBody)
@@ -326,8 +326,8 @@ func TestWageringReversal_RejectedReversal_ReplayIsStable(t *testing.T) {
 	key := "idem-" + uniqueID("k")
 	ref := betExternalID
 	rejectedIn := wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: round, gameID: "game-1", kind: "ROLLBACK", amount: "30.00", currency: testCurrency, referenceID: &ref,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: round, GameID: "game-1", Kind: "ROLLBACK", Amount: "30.00", Currency: testCurrency, ReferenceID: &ref,
 	}
 	original, originalBody := doWagering(t, h, token, rejectedIn, key, "")
 	if original.StatusCode != http.StatusUnprocessableEntity {
@@ -365,8 +365,8 @@ func TestWageringRollback_OfRollback_ReferenceKindNotReversible(t *testing.T) {
 
 	firstRollbackExternalID := uniqueID("ext")
 	first, firstBody := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: firstRollbackExternalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: round, gameID: "game-1", kind: "ROLLBACK", amount: "30.00", currency: testCurrency, referenceID: &betExternalID,
+		ProviderID: "provider-a", ExternalID: firstRollbackExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: round, GameID: "game-1", Kind: "ROLLBACK", Amount: "30.00", Currency: testCurrency, ReferenceID: &betExternalID,
 	}, "idem-"+uniqueID("k"), "")
 	if first.StatusCode != http.StatusOK {
 		t.Fatalf("first ROLLBACK status = %d, want 200, body = %s", first.StatusCode, firstBody)
@@ -390,8 +390,8 @@ func TestWageringRollback_OfLoss_ReferenceKindNotReversible(t *testing.T) {
 
 	lossExternalID := uniqueID("ext")
 	loss, lossBody := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: lossExternalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: round, gameID: "game-1", kind: "LOSS", amount: "0.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: lossExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: round, GameID: "game-1", Kind: "LOSS", Amount: "0.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if loss.StatusCode != http.StatusOK {
 		t.Fatalf("LOSS status = %d, want 200, body = %s", loss.StatusCode, lossBody)
@@ -425,8 +425,8 @@ func TestWageringRollback_ExceedsBalance_ReversalInsufficientFunds(t *testing.T)
 	}
 
 	betResp, betBody := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: round, gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: round, GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if betResp.StatusCode != http.StatusOK {
 		t.Fatalf("spending BET status = %d, want 200, body = %s", betResp.StatusCode, betBody)
@@ -478,8 +478,8 @@ func TestWageringRefund_RejectedReference_ReferenceNotProcessed(t *testing.T) {
 
 	betExternalID := uniqueID("ext")
 	bet, betBody := doWagering(t, h, token, wageringBodyInput{
-		providerID: "provider-a", externalID: betExternalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: round, gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: betExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: round, GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if bet.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("setup BET status = %d, want 422 (insufficient funds), body = %s", bet.StatusCode, betBody)

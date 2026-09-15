@@ -67,8 +67,8 @@ func TestReconciliation_OpeningAndBetMatchesStoredBalance(t *testing.T) {
 	h := newAppHarness(t)
 	wallet := openWalletHTTP(t, h, "1000.00")
 	resp, body := doWagering(t, h, providerAToken(t), wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "ledger-game", kind: "BET", amount: "25.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "ledger-game", Kind: "BET", Amount: "25.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("key"), uniqueID("corr"))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup BET status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -116,7 +116,7 @@ func TestLedgerPagination_KeysetCursorKeepsExistingEntriesExactlyOnceDuringConcu
 	wallet := openWalletHTTP(t, h, "100.00")
 	token := providerAToken(t)
 	for i := 0; i < 3; i++ {
-		resp, body := doWagering(t, h, token, wageringBodyInput{providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID, roundID: uniqueID("round"), gameID: "ledger-game", kind: "BET", amount: "1.00", currency: testCurrency}, "idem-"+uniqueID("key"), uniqueID("corr"))
+		resp, body := doWagering(t, h, token, wageringBodyInput{ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: uniqueID("round"), GameID: "ledger-game", Kind: "BET", Amount: "1.00", Currency: testCurrency}, "idem-"+uniqueID("key"), uniqueID("corr"))
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("setup BET %d status = %d, want 200, body = %s", i, resp.StatusCode, body)
 		}
@@ -130,7 +130,7 @@ func TestLedgerPagination_KeysetCursorKeepsExistingEntriesExactlyOnceDuringConcu
 		t.Fatalf("first page = %+v, want two entries and next cursor", first)
 	}
 
-	resp, body = doWagering(t, h, token, wageringBodyInput{providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID, roundID: uniqueID("round"), gameID: "ledger-game", kind: "BET", amount: "1.00", currency: testCurrency}, "idem-"+uniqueID("key"), uniqueID("corr"))
+	resp, body = doWagering(t, h, token, wageringBodyInput{ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: uniqueID("round"), GameID: "ledger-game", Kind: "BET", Amount: "1.00", Currency: testCurrency}, "idem-"+uniqueID("key"), uniqueID("corr"))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("concurrent BET status = %d, want 200, body = %s", resp.StatusCode, body)
 	}

@@ -106,8 +106,8 @@ func TestGetWageringTransactionByID_Owner_ReturnsFullRecord(t *testing.T) {
 	externalID := uniqueID("ext")
 
 	resp, body := doWagering(t, h, tokenA, wageringBodyInput{
-		providerID: "provider-a", externalID: externalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "30.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: externalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup POST status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -134,8 +134,8 @@ func TestGetWageringTransactionByID_OtherProvider_NotFound(t *testing.T) {
 	tokenA, tokenB := providerAToken(t), providerBToken(t)
 
 	resp, body := doWagering(t, h, tokenA, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "10.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "10.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup POST status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -177,8 +177,8 @@ func TestGetWageringTransactionByID_Admin_SeesOwnProviderRowAndOpening(t *testin
 	tokenA := providerAToken(t)
 
 	resp, body := doWagering(t, h, tokenA, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "10.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "10.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup POST status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -259,8 +259,8 @@ func TestGetProviderWageringTransaction_Owner_ReturnsFullRecord(t *testing.T) {
 	externalID := uniqueID("ext")
 
 	resp, body := doWagering(t, h, tokenA, wageringBodyInput{
-		providerID: "provider-a", externalID: externalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "15.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: externalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "15.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup POST status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -287,8 +287,8 @@ func TestGetProviderWageringTransaction_MismatchedProvider_Forbidden(t *testing.
 	externalID := uniqueID("ext")
 
 	resp, body := doWagering(t, h, tokenA, wageringBodyInput{
-		providerID: "provider-a", externalID: externalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "10.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: externalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "10.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup POST status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -307,8 +307,8 @@ func TestGetProviderWageringTransaction_Admin_AnyProvider(t *testing.T) {
 	externalID := uniqueID("ext")
 
 	resp, body := doWagering(t, h, tokenA, wageringBodyInput{
-		providerID: "provider-a", externalID: externalID, playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "10.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: externalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "10.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup POST status = %d, want 200, body = %s", resp.StatusCode, body)
@@ -387,8 +387,8 @@ func TestGetWageringTransactionByID_NoReference_NullKeysPresent(t *testing.T) {
 	tokenA := providerAToken(t)
 
 	resp, body := doWagering(t, h, tokenA, wageringBodyInput{
-		providerID: "provider-a", externalID: uniqueID("ext"), playerID: wallet.PlayerID, walletID: wallet.ID,
-		roundID: uniqueID("round"), gameID: "game-1", kind: "BET", amount: "10.00", currency: testCurrency,
+		ProviderID: "provider-a", ExternalID: uniqueID("ext"), PlayerID: wallet.PlayerID, WalletID: wallet.ID,
+		RoundID: uniqueID("round"), GameID: "game-1", Kind: "BET", Amount: "10.00", Currency: testCurrency,
 	}, "idem-"+uniqueID("k"), "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup POST status = %d, want 200, body = %s", resp.StatusCode, body)

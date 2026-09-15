@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/envfile"
+	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
 const defaultOwnerDSN = "postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable"
@@ -188,23 +189,12 @@ func newID(t *testing.T, prefix string) string {
 	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(buf[:]))
 }
 
-// newUUID returns a random version-4 UUID string for the internal
-// identifier columns this schema types as UUID (wallet, player, wager
-// transaction and ledger entry ids, and the outbox's event/aggregate ids).
-// The domain generates real ids as UUID v7 (see alignment.md); a hand
-// -rolled v4 generator needs only crypto/rand, already imported here, and
-// avoids pulling in a UUID dependency the alignment decisions never called
-// for - these tests only need a syntactically valid, unique UUID, not any
-// particular version's bit layout.
+// newUUID is test/testclient's shared UUID generator (spec, seam 3: "o
+// mesmo cliente de teste roda em dois harnesses") - test/multiinstance uses
+// the same function.
 func newUUID(t *testing.T) string {
 	t.Helper()
-	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		t.Fatalf("generate uuid: %v", err)
-	}
-	buf[6] = (buf[6] & 0x0f) | 0x40 // version 4
-	buf[8] = (buf[8] & 0x3f) | 0x80 // variant 10xx
-	return fmt.Sprintf("%x-%x-%x-%x-%x", buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16])
+	return testclient.NewUUID(t)
 }
 
 // randomHex returns a short, random, lowercase hex string safe to splice

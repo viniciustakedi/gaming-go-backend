@@ -1,9 +1,94 @@
 name: jungle-gaming-wallet
 
+# image: is set explicitly (rather than left to Compose's per-service
+# default name) so that `app`, `migrate` and the `multi` profile's app-1/
+# app-2/app-3 below all share one build instead of four - `docker compose
+# build`/`up --build` builds this image once, from whichever of those
+# services triggers it first, and every other service referencing the same
+# tag reuses it.
 x-app-image: &app-image
+  image: jungle-gaming-wallet/wallet-service:local
   build:
     context: .
     dockerfile: Dockerfile
+
+# Shared by every wallet-service container - the single instance (`app`)
+# and the three profile-gated ones below (spec: "Um perfil sobe três
+# instâncias em portas diferentes"). Only each service's own port mapping
+# differs; every instance binds :8080 internally and talks to the same
+# Postgres, MiniStack and Keycloak, so they genuinely dispute the same
+# wallets rather than each getting their own.
+x-app-environment: &app-environment
+  HTTP_ADDR: :8080
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # No owner credential reaches this container at all - only host, port,
+  # database and sslmode, none of them a secret. internal/config.Load
+  # assembles these into a DSN with no userinfo, and pg.New
+  # (internal/pg.AppDSN) adds wallet_app's own least-privilege
+  # credentials on top of it, reading the password from
+  # DATABASE_APP_CREDENTIALS_FILE below (spec: "a aplicação usa outro
+  # [papel], com apenas os grants necessários" - see README.md,
+  # "Credenciais do Postgres"). `docker compose exec app env` never
+  # shows the migration owner's password.
+  DATABASE_HOST: postgres
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: ${POSTGRES_DB:-wallet}
+  DATABASE_SSLMODE: disable
+  DATABASE_APP_CREDENTIALS_FILE: /shared/postgres-credentials.env
+  SQS_ENDPOINT_URL: http://ministack:4566
+  SQS_REGION: ${SQS_REGION:-us-east-1}
+  SQS_INPUT_QUEUE_NAME: ${SQS_INPUT_QUEUE_NAME:-wager-transactions.fifo}
+  SQS_DLQ_QUEUE_NAME: ${SQS_DLQ_QUEUE_NAME:-wager-transactions-dlq.fifo}
+  SQS_OUTPUT_QUEUE_NAME: ${SQS_OUTPUT_QUEUE_NAME:-wallet-events.fifo}
+  IAM_CREDENTIALS_FILE: /shared/app-credentials.env
+  # Keycloak's own boot (including the realm import above) routinely
+  # takes longer than Postgres or MiniStack, and depends_on below can
+  # only wait for the container to start, not for Keycloak to actually
+  # be ready - AUTH_DISCOVERY_TIMEOUT's generous default (see
+  # internal/config) is what makes internal/auth's own retry loop
+  # absorb the rest of that wait (ticket 07: "Descoberta OIDC no start
+  # hook, com retry limitado ao prazo de start").
+  #
+  # AUTH_ISSUER_URL is the public address (keycloak's KC_HOSTNAME above)
+  # every token's own "iss" claim carries, regardless of who requested
+  # it - this is what internal/auth validates a token against, and it
+  # must be the exact address a host-side caller (curl, the README's own
+  # flow) uses too. AUTH_DISCOVERY_URL is only where this container
+  # fetches Keycloak's OIDC configuration and JWKS from - the app can
+  # never reach AUTH_ISSUER_URL's host-facing address from inside the
+  # Compose network, only keycloak:8080 - and is never compared against
+  # a token's "iss" (internal/auth.discoverWithRetry; ticket 07: "separe
+  # issuer esperado de URL de descoberta e JWKS").
+  AUTH_ISSUER_URL: http://localhost:${KEYCLOAK_PORT:-8081}/realms/wallet
+  AUTH_DISCOVERY_URL: http://keycloak:8080/realms/wallet
+  AUTH_AUDIENCE: ${AUTH_AUDIENCE:-wallet-api}
+  # SQS_CONSUMER_ACCESS_KEY_ID, SQS_CONSUMER_SECRET_ACCESS_KEY,
+  # SQS_PUBLISHER_ACCESS_KEY_ID and SQS_PUBLISHER_SECRET_ACCESS_KEY are
+  # deliberately not set here: deploy/docker/entrypoint.sh sources them
+  # from the file provisioning wrote, since they only exist after that
+  # container has run.
+
+# Only the app's own files are mounted - never a whole .runtime directory -
+# so a wallet-service container has no path to gateway, events-reader, IAM
+# test fixture keys or the Postgres owner's own credentials, only its own
+# SQS consumer/publisher pair and wallet_app's password. Both provisioning
+# scripts chown their file to the same UID/GID the Dockerfile's non-root
+# "app" user runs as, so each stays readable despite mode 0600.
+x-app-volumes: &app-volumes
+  - ./deploy/ministack/.runtime/app-credentials.env:/shared/app-credentials.env:ro
+  - ./deploy/postgres/.runtime/credentials.env:/shared/postgres-credentials.env:ro
+
+x-app-depends-on: &app-depends-on
+  postgres:
+    condition: service_healthy
+  postgres-provisioning:
+    condition: service_completed_successfully
+  provisioning:
+    condition: service_completed_successfully
+  migrate:
+    condition: service_completed_successfully
+  keycloak:
+    condition: service_started
 
 services:
   postgres:
@@ -169,73 +254,48 @@ services:
     <<: *app-image
     ports:
       - "${HTTP_PORT:-8080}:8080"
-    environment:
-      HTTP_ADDR: :8080
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      # No owner credential reaches this container at all - only host, port,
-      # database and sslmode, none of them a secret. internal/config.Load
-      # assembles these into a DSN with no userinfo, and pg.New
-      # (internal/pg.AppDSN) adds wallet_app's own least-privilege
-      # credentials on top of it, reading the password from
-      # DATABASE_APP_CREDENTIALS_FILE below (spec: "a aplicação usa outro
-      # [papel], com apenas os grants necessários" - see README.md,
-      # "Credenciais do Postgres"). `docker compose exec app env` never
-      # shows the migration owner's password.
-      DATABASE_HOST: postgres
-      DATABASE_PORT: "5432"
-      DATABASE_NAME: ${POSTGRES_DB:-wallet}
-      DATABASE_SSLMODE: disable
-      DATABASE_APP_CREDENTIALS_FILE: /shared/postgres-credentials.env
-      SQS_ENDPOINT_URL: http://ministack:4566
-      SQS_REGION: ${SQS_REGION:-us-east-1}
-      SQS_INPUT_QUEUE_NAME: ${SQS_INPUT_QUEUE_NAME:-wager-transactions.fifo}
-      SQS_DLQ_QUEUE_NAME: ${SQS_DLQ_QUEUE_NAME:-wager-transactions-dlq.fifo}
-      SQS_OUTPUT_QUEUE_NAME: ${SQS_OUTPUT_QUEUE_NAME:-wallet-events.fifo}
-      IAM_CREDENTIALS_FILE: /shared/app-credentials.env
-      # Keycloak's own boot (including the realm import above) routinely
-      # takes longer than Postgres or MiniStack, and depends_on below can
-      # only wait for the container to start, not for Keycloak to actually
-      # be ready - AUTH_DISCOVERY_TIMEOUT's generous default (see
-      # internal/config) is what makes internal/auth's own retry loop
-      # absorb the rest of that wait (ticket 07: "Descoberta OIDC no start
-      # hook, com retry limitado ao prazo de start").
-      #
-      # AUTH_ISSUER_URL is the public address (keycloak's KC_HOSTNAME above)
-      # every token's own "iss" claim carries, regardless of who requested
-      # it - this is what internal/auth validates a token against, and it
-      # must be the exact address a host-side caller (curl, the README's own
-      # flow) uses too. AUTH_DISCOVERY_URL is only where this container
-      # fetches Keycloak's OIDC configuration and JWKS from - the app can
-      # never reach AUTH_ISSUER_URL's host-facing address from inside the
-      # Compose network, only keycloak:8080 - and is never compared against
-      # a token's "iss" (internal/auth.discoverWithRetry; ticket 07: "separe
-      # issuer esperado de URL de descoberta e JWKS").
-      AUTH_ISSUER_URL: http://localhost:${KEYCLOAK_PORT:-8081}/realms/wallet
-      AUTH_DISCOVERY_URL: http://keycloak:8080/realms/wallet
-      AUTH_AUDIENCE: ${AUTH_AUDIENCE:-wallet-api}
-      # SQS_CONSUMER_ACCESS_KEY_ID, SQS_CONSUMER_SECRET_ACCESS_KEY,
-      # SQS_PUBLISHER_ACCESS_KEY_ID and SQS_PUBLISHER_SECRET_ACCESS_KEY are
-      # deliberately not set here: deploy/docker/entrypoint.sh sources them
-      # from the file provisioning wrote, since they only exist after that
-      # container has run.
-    volumes:
-      # Only the app's own files are mounted - never a whole .runtime
-      # directory - so this container has no path to gateway, events-reader,
-      # IAM test fixture keys or the Postgres owner's own credentials, only
-      # its own SQS consumer/publisher pair and wallet_app's password. Both
-      # provisioning scripts chown their file to the same UID/GID the
-      # Dockerfile's non-root "app" user runs as, so each stays readable
-      # despite mode 0600.
-      - ./deploy/ministack/.runtime/app-credentials.env:/shared/app-credentials.env:ro
-      - ./deploy/postgres/.runtime/credentials.env:/shared/postgres-credentials.env:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-      postgres-provisioning:
-        condition: service_completed_successfully
-      provisioning:
-        condition: service_completed_successfully
-      migrate:
-        condition: service_completed_successfully
-      keycloak:
-        condition: service_started
+    environment: *app-environment
+    volumes: *app-volumes
+    depends_on: *app-depends-on
+
+  # Multi-instance profile (spec: "Um perfil sobe três instâncias em portas
+  # diferentes"; ticket: "harness ... sobe três processos em portas
+  # distintas"). Not started by a plain `docker compose up`: profiles
+  # opt-in, so app-1/app-2/app-3 only run when asked for by name -
+  #
+  #   docker compose --profile multi up -d --build app-1 app-2 app-3
+  #
+  # - which also brings up postgres/ministack/keycloak/migrate/provisioning
+  # as their dependencies, but deliberately not the plain `app` service
+  # above (listing services explicitly limits `up` to exactly those plus
+  # their own dependencies - see README.md, "Múltiplas instâncias"). All
+  # three share *app-environment/*app-volumes/*app-depends-on with `app`:
+  # same Postgres, same MiniStack queues, same Keycloak realm, so they
+  # genuinely dispute the same wallets rather than each getting an
+  # isolated copy. Only the host port differs.
+  app-1:
+    <<: *app-image
+    profiles: ["multi"]
+    ports:
+      - "${HTTP_PORT_1:-8091}:8080"
+    environment: *app-environment
+    volumes: *app-volumes
+    depends_on: *app-depends-on
+
+  app-2:
+    <<: *app-image
+    profiles: ["multi"]
+    ports:
+      - "${HTTP_PORT_2:-8092}:8080"
+    environment: *app-environment
+    volumes: *app-volumes
+    depends_on: *app-depends-on
+
+  app-3:
+    <<: *app-image
+    profiles: ["multi"]
+    ports:
+      - "${HTTP_PORT_3:-8093}:8080"
+    environment: *app-environment
+    volumes: *app-volumes
+    depends_on: *app-depends-on
