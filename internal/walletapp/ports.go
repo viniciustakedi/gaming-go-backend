@@ -30,6 +30,14 @@ var ErrNotFound = errors.New("walletapp: not found")
 // opens for the same pair safe: only one INSERT can win.
 var ErrAlreadyExists = errors.New("walletapp: wallet already exists")
 
+// ErrForbiddenProvider is returned by GetTransactionUseCase.ByProviderExternalID
+// when an authenticated provider asks about a route providerId that is not
+// its own (spec: "GET /providers/:providerId/...: provider com providerId
+// diferente devolve 403"). Unlike ErrNotFound, this deliberately does not
+// hide the route's shape - the providerId itself is not secret, only the
+// transactions scoped under it are - so the HTTP layer answers 403, not 404.
+var ErrForbiddenProvider = errors.New("walletapp: caller's providerId does not match the route")
+
 // ErrConcurrencyConflict is returned by WalletRepository.UpdateBalance when
 // the row's version no longer matches the one the caller read under its own
 // FOR UPDATE lock. This is defense in depth (spec: "as garantias no banco
@@ -69,6 +77,38 @@ type WalletRepository interface {
 	// previousVersion - the version the caller read at lock time - and
 	// returns ErrConcurrencyConflict if the row has since moved on.
 	UpdateBalance(ctx context.Context, w *domainwallet.Wallet, previousVersion int64) error
+}
+
+// TransactionDetail is the full read-only projection of one wager
+// transaction row (spec, "Contratos HTTP": "registro completo: ids, tipo,
+// money, referências, status, failureCode, saldo resultante, tentativas,
+// próximo envio e timestamps"). ExternalTransactionID, ProviderID, RoundID
+// and GameID are empty for an INTERNAL row - only OPENING is ever INTERNAL,
+// and it carries none of them (spec, migration 0004). ResultingBalance is
+// nil except for PROCESSED and REJECTED, and NextAttemptAt/PendingExpiresAt
+// are nil except for PENDING_REFERENCE, mirroring the same columns'
+// terminal-status CHECK constraints.
+type TransactionDetail struct {
+	TransactionID                  string
+	ExternalTransactionID          string
+	ProviderID                     string
+	PlayerID                       string
+	WalletID                       string
+	RoundID                        string
+	GameID                         string
+	Kind                           domainwallet.WagerKind
+	Origin                         domainwallet.TransactionOrigin
+	Money                          money.Money
+	ReferenceExternalTransactionID string
+	ReferenceTransactionID         string
+	Status                         domainwallet.TransactionStatus
+	FailureCode                    string
+	ResultingBalance               *money.Money
+	Attempts                       int
+	NextAttemptAt                  *time.Time
+	PendingExpiresAt               *time.Time
+	CreatedAt                      time.Time
+	UpdatedAt                      time.Time
 }
 
 // ExistingTransaction is the persisted state of an external wager
@@ -123,6 +163,20 @@ type WagerTransactionRepository interface {
 	// BET aceita uma única reversão bem-sucedida"). Only meaningful once
 	// the reference itself is PROCESSED.
 	ExistsSuccessfulReversal(ctx context.Context, referenceTransactionID string) (bool, error)
+	// FindDetailByID returns the full record for the internal transaction
+	// id, unscoped by provider - GetTransactionUseCase.ByID applies the
+	// isolation rule itself, since only it knows whether the caller is
+	// wallet-admin (spec: "wallet-admin vê todas, inclusive OPENING").
+	// Returns ErrNotFound when no row matches.
+	FindDetailByID(ctx context.Context, id string) (*TransactionDetail, error)
+	// FindDetailByProviderExternalID returns the full record for one
+	// provider's externalTransactionId, scoped by providerID the same way
+	// every other external lookup in this package is (spec: "o escopo de
+	// chaves é por provedor"). providerID is the route's own providerId,
+	// not necessarily the caller's - GetTransactionUseCase.ByProviderExternalID
+	// decides whether the caller may ask about it before this is ever
+	// called. Returns ErrNotFound when no row matches.
+	FindDetailByProviderExternalID(ctx context.Context, providerID, externalTransactionID string) (*TransactionDetail, error)
 }
 
 // LedgerRepository appends one immutable ledger entry.

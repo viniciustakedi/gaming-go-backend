@@ -55,6 +55,13 @@ func NewWalletReader(pool *pgxpool.Pool) walletapp.WalletRepository {
 	return newWalletRepository(pool)
 }
 
+// NewTransactionReader builds the WagerTransactionRepository bound directly
+// to the pool, for GetTransactionUseCase's two reads - like NewWalletReader,
+// neither needs a transaction boundary.
+func NewTransactionReader(pool *pgxpool.Pool) walletapp.WagerTransactionRepository {
+	return newWagerTransactionRepository(pool)
+}
+
 // Module provides the pgx-backed unit of work, the read-only wallet
 // repository and, from them, the application use cases internal/httpapi
 // calls - the "wallet (casos de uso de carteira e reconciliação)" module the
@@ -65,10 +72,12 @@ var Module = fx.Module("wallet",
 	fx.Provide(
 		NewUnitOfWork,
 		NewWalletReader,
+		NewTransactionReader,
 		newLedgerAuditRepository,
 		walletapp.NewOpenWalletUseCase,
 		walletapp.NewGetWalletUseCase,
 		walletapp.NewLedgerAuditUseCase,
 		walletapp.NewProcessOperationUseCase,
+		walletapp.NewGetTransactionUseCase,
 	),
 )

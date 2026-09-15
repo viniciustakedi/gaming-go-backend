@@ -152,7 +152,7 @@ func statusForWageringError(err *operation.Error) int {
 	switch err.Code() {
 	case operation.CodeInvalidRequest, operation.CodeInvalidMoney:
 		return http.StatusBadRequest
-	case operation.CodeWalletNotFound:
+	case operation.CodeWalletNotFound, operation.CodeTransactionNotFound:
 		return http.StatusNotFound
 	}
 	switch err.Classification() {

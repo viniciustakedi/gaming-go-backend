@@ -5,15 +5,23 @@ package operation
 type Code string
 
 const (
-	CodeInvalidRequest                Code = "INVALID_REQUEST"
-	CodeInvalidMoney                  Code = "INVALID_MONEY"
-	CodeUnsupportedCurrency           Code = "UNSUPPORTED_CURRENCY"
-	CodeInvalidAmountForKind          Code = "INVALID_AMOUNT_FOR_KIND"
-	CodeKindNotAllowed                Code = "KIND_NOT_ALLOWED"
-	CodeMissingIdempotencyKey         Code = "MISSING_IDEMPOTENCY_KEY"
-	CodeReferenceRequired             Code = "REFERENCE_REQUIRED"
-	CodeReferenceNotAllowed           Code = "REFERENCE_NOT_ALLOWED"
-	CodeWalletNotFound                Code = "WALLET_NOT_FOUND"
+	CodeInvalidRequest        Code = "INVALID_REQUEST"
+	CodeInvalidMoney          Code = "INVALID_MONEY"
+	CodeUnsupportedCurrency   Code = "UNSUPPORTED_CURRENCY"
+	CodeInvalidAmountForKind  Code = "INVALID_AMOUNT_FOR_KIND"
+	CodeKindNotAllowed        Code = "KIND_NOT_ALLOWED"
+	CodeMissingIdempotencyKey Code = "MISSING_IDEMPOTENCY_KEY"
+	CodeReferenceRequired     Code = "REFERENCE_REQUIRED"
+	CodeReferenceNotAllowed   Code = "REFERENCE_NOT_ALLOWED"
+	CodeWalletNotFound        Code = "WALLET_NOT_FOUND"
+	// CodeTransactionNotFound is not in the spec's own catalog (it lists
+	// only the codes POST /wagering/transactions can return); it follows
+	// WALLET_NOT_FOUND's precedent for the two GET routes ticket 09 adds,
+	// which need a stable code for "no such transaction, or the caller is
+	// not authorized to see it" without revealing which (spec, "Contratos
+	// HTTP", GET .../transactions/:id: "as de outro provedor ... devolvem
+	// 404, sem revelar existência").
+	CodeTransactionNotFound           Code = "TRANSACTION_NOT_FOUND"
 	CodeWalletPlayerMismatch          Code = "WALLET_PLAYER_MISMATCH"
 	CodeWalletCurrencyMismatch        Code = "WALLET_CURRENCY_MISMATCH"
 	CodeInsufficientFunds             Code = "INSUFFICIENT_FUNDS"
@@ -82,6 +90,7 @@ var (
 	ErrReferenceRequired             = newError(CodeReferenceRequired)
 	ErrReferenceNotAllowed           = newError(CodeReferenceNotAllowed)
 	ErrWalletNotFound                = newError(CodeWalletNotFound)
+	ErrTransactionNotFound           = newError(CodeTransactionNotFound)
 	ErrWalletPlayerMismatch          = newError(CodeWalletPlayerMismatch)
 	ErrWalletCurrencyMismatch        = newError(CodeWalletCurrencyMismatch)
 	ErrInsufficientFunds             = newError(CodeInsufficientFunds)
@@ -111,7 +120,7 @@ func newError(code Code) *Error {
 func ClassificationFor(code Code) (Classification, bool) {
 	switch code {
 	case CodeInvalidRequest, CodeInvalidMoney, CodeUnsupportedCurrency, CodeInvalidAmountForKind, CodeKindNotAllowed,
-		CodeMissingIdempotencyKey, CodeReferenceRequired, CodeReferenceNotAllowed, CodeWalletNotFound,
+		CodeMissingIdempotencyKey, CodeReferenceRequired, CodeReferenceNotAllowed, CodeWalletNotFound, CodeTransactionNotFound,
 		CodeWalletPlayerMismatch, CodeWalletCurrencyMismatch:
 		return Correctable, true
 	case CodeInsufficientFunds, CodeReversalInsufficientFunds, CodeReferenceNotFound, CodeReferenceNotProcessed,

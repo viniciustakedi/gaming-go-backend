@@ -51,15 +51,21 @@ func (s *Server) Addr() string {
 	return s.Listener.Addr().String()
 }
 
-func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessChecks, logger *slog.Logger, verifier auth.Verifier, openWallet *walletapp.OpenWalletUseCase, getWallet *walletapp.GetWalletUseCase, ledgerAudit *walletapp.LedgerAuditUseCase, processOperation *walletapp.ProcessOperationUseCase) (*Server, error) {
+func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessChecks, logger *slog.Logger, verifier auth.Verifier, openWallet *walletapp.OpenWalletUseCase, getWallet *walletapp.GetWalletUseCase, ledgerAudit *walletapp.LedgerAuditUseCase, processOperation *walletapp.ProcessOperationUseCase, getTransaction *walletapp.GetTransactionUseCase) (*Server, error) {
 	readiness := NewReadiness(checks.Checks, cfg.HTTP.ReadinessTimeout)
 	latency := newHTTPLatency(registry)
 	reconciliationMetrics := newReconciliationMetrics(registry)
 
 	// Every /wallets* route requires the wallet-admin realm role, and
-	// /wagering/transactions requires provider, both checked by requireRole
-	// once the mux has matched a route. /health/* and /metrics stay
-	// unauthenticated (spec, decision 7).
+	// POST /wagering/transactions requires provider, both checked by
+	// requireRole once the mux has matched a route. The two read routes
+	// below accept either role (requireAnyRole): a provider sees only its
+	// own transactions and a wallet-admin sees every one, a distinction the
+	// route alone cannot express, so GetTransactionUseCase applies it once
+	// the caller's role and identity are known (spec, decision 7: "GET
+	// /wagering/transactions/:id ... wallet-admin vê todas"). /health/* and
+	// /metrics stay unauthenticated (spec, decision 7).
+	providerOrAdmin := []string{auth.RoleProvider, auth.RoleWalletAdmin}
 	mux := http.NewServeMux()
 	mux.Handle("GET /health/live", liveHandler())
 	mux.Handle("GET /health/ready", readyHandler(readiness))
@@ -69,6 +75,8 @@ func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessCheck
 	mux.Handle("GET /wallets/{walletId}/ledger", latency.wrap("GET /wallets/{walletId}/ledger", requireRole(auth.RoleWalletAdmin, ledgerHandler(ledgerAudit, logger))))
 	mux.Handle("POST /wallets/{walletId}/reconciliation", latency.wrap("POST /wallets/{walletId}/reconciliation", requireRole(auth.RoleWalletAdmin, reconciliationHandler(ledgerAudit, logger, reconciliationMetrics))))
 	mux.Handle("POST /wagering/transactions", latency.wrap("POST /wagering/transactions", requireRole(auth.RoleProvider, wageringTransactionsHandler(processOperation, logger))))
+	mux.Handle("GET /wagering/transactions/{transactionId}", latency.wrap("GET /wagering/transactions/{transactionId}", requireAnyRole(providerOrAdmin, wageringTransactionByIDHandler(getTransaction, logger))))
+	mux.Handle("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", latency.wrap("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", requireAnyRole(providerOrAdmin, providerWageringTransactionHandler(getTransaction, logger))))
 
 	return &Server{
 		HTTP: &http.Server{
