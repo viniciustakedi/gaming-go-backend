@@ -36,8 +36,6 @@ package integration
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,6 +48,8 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+
+	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
 type roleCreds struct {
@@ -473,15 +473,9 @@ func TestIAM_RedriveToDLQ(t *testing.T) {
 	}
 }
 
-// uniqueID returns a short, random, collision-free identifier - unlike a
-// timestamp-derived id, concurrent callers under go test -race never
-// collide (see newID's own crypto/rand approach in helpers_test.go, which
-// this mirrors; uniqueID keeps its own copy since it has no *testing.T to
-// call t.Helper()/t.Fatalf() with).
+// uniqueID is test/testclient's shared id generator (spec, seam 3: "o mesmo
+// cliente de teste roda em dois harnesses") - test/multiinstance uses the
+// same function.
 func uniqueID(prefix string) string {
-	var buf [8]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		panic(fmt.Sprintf("generate id: %v", err))
-	}
-	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(buf[:]))
+	return testclient.UniqueID(prefix)
 }
