@@ -118,6 +118,39 @@ type LedgerRepository interface {
 	Insert(ctx context.Context, entry *domainwallet.WalletLedgerEntry) error
 }
 
+// LedgerEntry is the externally auditable projection of one immutable ledger row.
+type LedgerEntry struct {
+	SequenceNumber int64
+	TransactionID  string
+	Direction      domainwallet.Direction
+	Money          money.Money
+	BalanceBefore  money.Money
+	BalanceAfter   money.Money
+	OccurredAt     time.Time
+}
+
+// LedgerPage is a stable, keyset-paginated segment of one wallet's ledger.
+type LedgerPage struct {
+	Entries []LedgerEntry
+	Next    *int64
+}
+
+// Reconciliation is the result of rebuilding a wallet balance from its ledger.
+type Reconciliation struct {
+	WalletID          string
+	StoredBalance     money.Money
+	CalculatedBalance money.Money
+	Difference        money.Money
+	CheckedEntries    int64
+}
+
+// LedgerAuditRepository is the read side of the ledger. Reconcile must use one
+// repeatable-read, read-only database snapshot for every value it returns.
+type LedgerAuditRepository interface {
+	List(ctx context.Context, walletID string, afterSequence int64, limit int) (LedgerPage, error)
+	Reconcile(ctx context.Context, walletID string) (Reconciliation, error)
+}
+
 // OutboxRecord is the row-level shape OutboxRepository persists. Payload is
 // marshaled to JSON by the repository, not by the use case, so this package
 // never has to know the storage encoding.

@@ -62,7 +62,7 @@ func TestRegisterLifecycle_EarlierHookFailureLeavesPortFree(t *testing.T) {
 	cfg := testHTTPConfig(addr)
 	logger := discardLogger()
 
-	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil, nil)
+	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestRegisterLifecycle_StopReleasesPortForRetry(t *testing.T) {
 	logger := discardLogger()
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil, nil)
+		server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("attempt %d: New: %v", attempt, err)
 		}
@@ -124,7 +124,7 @@ func TestRegisterLifecycle_StopReleasesPortForRetry(t *testing.T) {
 func TestServer_BusinessNamespace_AuthenticatesBeforeRouting(t *testing.T) {
 	verifier := fakeVerifier{identity: auth.Identity{Subject: "wallet-service-sub", Roles: []string{auth.RoleWalletAdmin}}}
 	cfg := testHTTPConfig(freeAddr(t))
-	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, discardLogger(), verifier, nil, nil, nil)
+	server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, discardLogger(), verifier, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
