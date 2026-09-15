@@ -51,9 +51,10 @@ func (s *Server) Addr() string {
 	return s.Listener.Addr().String()
 }
 
-func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessChecks, logger *slog.Logger, verifier auth.Verifier, openWallet *walletapp.OpenWalletUseCase, getWallet *walletapp.GetWalletUseCase, processOperation *walletapp.ProcessOperationUseCase) (*Server, error) {
+func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessChecks, logger *slog.Logger, verifier auth.Verifier, openWallet *walletapp.OpenWalletUseCase, getWallet *walletapp.GetWalletUseCase, ledgerAudit *walletapp.LedgerAuditUseCase, processOperation *walletapp.ProcessOperationUseCase) (*Server, error) {
 	readiness := NewReadiness(checks.Checks, cfg.HTTP.ReadinessTimeout)
 	latency := newHTTPLatency(registry)
+	reconciliationMetrics := newReconciliationMetrics(registry)
 
 	// Every /wallets* route requires the wallet-admin realm role, and
 	// /wagering/transactions requires provider, both checked by requireRole
@@ -65,6 +66,8 @@ func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessCheck
 	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{Registry: registry}))
 	mux.Handle("POST /wallets", latency.wrap("POST /wallets", requireRole(auth.RoleWalletAdmin, openWalletHandler(openWallet, logger))))
 	mux.Handle("GET /wallets/{walletId}", latency.wrap("GET /wallets/{walletId}", requireRole(auth.RoleWalletAdmin, getWalletHandler(getWallet, logger))))
+	mux.Handle("GET /wallets/{walletId}/ledger", latency.wrap("GET /wallets/{walletId}/ledger", requireRole(auth.RoleWalletAdmin, ledgerHandler(ledgerAudit, logger))))
+	mux.Handle("POST /wallets/{walletId}/reconciliation", latency.wrap("POST /wallets/{walletId}/reconciliation", requireRole(auth.RoleWalletAdmin, reconciliationHandler(ledgerAudit, logger, reconciliationMetrics))))
 	mux.Handle("POST /wagering/transactions", latency.wrap("POST /wagering/transactions", requireRole(auth.RoleProvider, wageringTransactionsHandler(processOperation, logger))))
 
 	return &Server{

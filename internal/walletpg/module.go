@@ -65,8 +65,10 @@ var Module = fx.Module("wallet",
 	fx.Provide(
 		NewUnitOfWork,
 		NewWalletReader,
+		newLedgerAuditRepository,
 		walletapp.NewOpenWalletUseCase,
 		walletapp.NewGetWalletUseCase,
+		walletapp.NewLedgerAuditUseCase,
 		walletapp.NewProcessOperationUseCase,
 	),
 )
