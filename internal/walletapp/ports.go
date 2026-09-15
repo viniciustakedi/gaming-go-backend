@@ -111,6 +111,18 @@ type WagerTransactionRepository interface {
 	// provider (spec: "o escopo de chaves é por provedor").
 	FindByIdempotencyKey(ctx context.Context, providerID, idempotencyKey string) (*ExistingTransaction, error)
 	FindByExternalTransactionID(ctx context.Context, providerID, externalTransactionID string) (*ExistingTransaction, error)
+	// FindReference resolves the transaction a REFUND, ROLLBACK or a
+	// referenced WIN names, scoped to the same provider the operation
+	// itself came from (spec: "a referência é resolvida por (providerId,
+	// referenceExternalTransactionId)"). It returns ErrNotFound when no
+	// such transaction has arrived yet; the caller - not this port -
+	// decides what an unresolved reference means.
+	FindReference(ctx context.Context, providerID, referenceExternalTransactionID string) (*domainwallet.WagerTransaction, error)
+	// ExistsSuccessfulReversal reports whether referenceTransactionID
+	// already has a PROCESSED REFUND or ROLLBACK against it (spec: "uma
+	// BET aceita uma única reversão bem-sucedida"). Only meaningful once
+	// the reference itself is PROCESSED.
+	ExistsSuccessfulReversal(ctx context.Context, referenceTransactionID string) (bool, error)
 }
 
 // LedgerRepository appends one immutable ledger entry.

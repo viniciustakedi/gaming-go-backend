@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -154,6 +155,85 @@ func (r *transactionRepository) findExisting(ctx context.Context, sql, providerI
 		record.FailureCode = *failureCode
 	}
 	return record, nil
+}
+
+// FindReference resolves a REFUND, ROLLBACK or referenced WIN's reference
+// by (providerId, referenceExternalTransactionId) (spec, "Regras das
+// operações e referências"). It rehydrates the full domain transaction -
+// not just the handful of fields operation.Evaluate reads - so a corrupted
+// row fails validate() here rather than being silently trusted.
+func (r *transactionRepository) FindReference(ctx context.Context, providerID, referenceExternalTransactionID string) (*domainwallet.WagerTransaction, error) {
+	row := r.q.QueryRow(ctx, `
+		SELECT id, external_transaction_id, provider_id, idempotency_key, payload_hash,
+			wallet_id, player_id, round_id, game_id, kind, origin, amount, currency,
+			reference_external_transaction_id, reference_transaction_id, status, failure_code,
+			created_at, updated_at
+		FROM wager_transactions
+		WHERE provider_id = $1 AND external_transaction_id = $2`, providerID, referenceExternalTransactionID)
+
+	var (
+		id, externalTransactionID, txProviderID, idempotencyKey, payloadHash string
+		walletID, playerID, roundID, gameID, kind, origin, currency          string
+		amount                                                               int64
+		referenceExternalID, referenceTransactionID, failureCode             *string
+		status                                                               string
+		createdAt, updatedAt                                                 time.Time
+	)
+	if err := row.Scan(
+		&id, &externalTransactionID, &txProviderID, &idempotencyKey, &payloadHash,
+		&walletID, &playerID, &roundID, &gameID, &kind, &origin, &amount, &currency,
+		&referenceExternalID, &referenceTransactionID, &status, &failureCode, &createdAt, &updatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, walletapp.ErrNotFound
+		}
+		return nil, fmt.Errorf("walletpg: find reference transaction: %w", err)
+	}
+
+	amountMoney, err := money.New(amount, money.Currency(currency))
+	if err != nil {
+		return nil, fmt.Errorf("walletpg: decode reference amount: %w", err)
+	}
+
+	input := domainwallet.RehydratedTransaction{
+		ID: id, ExternalTransactionID: externalTransactionID, ProviderID: txProviderID,
+		IdempotencyKey: idempotencyKey, PayloadHash: payloadHash, WalletID: walletID, PlayerID: playerID,
+		RoundID: roundID, GameID: gameID, Kind: domainwallet.WagerKind(kind), Origin: domainwallet.TransactionOrigin(origin),
+		Money: amountMoney, Status: domainwallet.TransactionStatus(status), CreatedAt: createdAt, UpdatedAt: updatedAt,
+	}
+	if referenceExternalID != nil {
+		input.ReferenceExternalTransactionID = *referenceExternalID
+	}
+	if referenceTransactionID != nil {
+		input.ReferenceTransactionID = *referenceTransactionID
+	}
+	if failureCode != nil {
+		input.FailureCode = *failureCode
+	}
+
+	transaction, err := domainwallet.RehydrateTransaction(input)
+	if err != nil {
+		return nil, fmt.Errorf("walletpg: rehydrate reference transaction: %w", err)
+	}
+	return transaction, nil
+}
+
+// ExistsSuccessfulReversal backs the partial unique index's application-side
+// counterpart (spec, migration 0004: "wager_transactions_reversal_per_reference_idx").
+// It is only ever queried while this call still holds the referenced
+// transaction's wallet FOR UPDATE lock, so a concurrent REFUND and ROLLBACK
+// of the same BET can never both observe false: the second one always runs
+// after the first's commit has become visible.
+func (r *transactionRepository) ExistsSuccessfulReversal(ctx context.Context, referenceTransactionID string) (bool, error) {
+	var exists bool
+	if err := r.q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM wager_transactions
+			WHERE reference_transaction_id = $1 AND kind IN ('REFUND', 'ROLLBACK') AND status = 'PROCESSED'
+		)`, referenceTransactionID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("walletpg: check successful reversal: %w", err)
+	}
+	return exists, nil
 }
 
 func strPtr(s string) *string { return &s }

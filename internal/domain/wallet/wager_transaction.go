@@ -57,7 +57,11 @@ type ExternalTransactionInput struct {
 	Kind                           WagerKind
 	Money                          money.Money
 	ReferenceExternalTransactionID string
-	CreatedAt                      time.Time
+	// ReferenceTransactionID is the internal id the reference resolved to
+	// (spec: "a referência resolvida fica persistida"). Empty for BET, LOSS
+	// and a WIN with no reference, since none of them ever resolve one.
+	ReferenceTransactionID string
+	CreatedAt              time.Time
 }
 
 // OpeningTransactionInput contains only the metadata that belongs to an internal opening credit.
@@ -120,7 +124,8 @@ func NewExternalTransaction(input ExternalTransactionInput) (*WagerTransaction, 
 		idempotencyKey: input.IdempotencyKey, payloadHash: input.PayloadHash, walletID: input.WalletID,
 		playerID: input.PlayerID, roundID: input.RoundID, gameID: input.GameID, kind: input.Kind,
 		origin: External, money: input.Money, referenceExternalTransactionID: input.ReferenceExternalTransactionID,
-		status: Pending, createdAt: input.CreatedAt.UTC(), updatedAt: input.CreatedAt.UTC(),
+		referenceTransactionID: input.ReferenceTransactionID,
+		status:                 Pending, createdAt: input.CreatedAt.UTC(), updatedAt: input.CreatedAt.UTC(),
 	}
 	if err := transaction.validate(); err != nil {
 		return nil, err

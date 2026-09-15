@@ -103,6 +103,10 @@ type fakeTransactionRepository struct {
 	byIdempotencyKeyErr     error
 	byExternal              *walletapp.ExistingTransaction
 	byExternalErr           error
+	reference               *domainwallet.WagerTransaction
+	referenceErr            error
+	alreadyReversed         bool
+	alreadyReversedErr      error
 }
 
 func (f *fakeTransactionRepository) Insert(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error {
@@ -163,6 +167,23 @@ func (f *fakeTransactionRepository) FindByExternalTransactionID(ctx context.Cont
 		return nil, walletapp.ErrNotFound
 	}
 	return f.byExternal, nil
+}
+
+func (f *fakeTransactionRepository) FindReference(ctx context.Context, providerID, referenceExternalTransactionID string) (*domainwallet.WagerTransaction, error) {
+	if f.referenceErr != nil {
+		return nil, f.referenceErr
+	}
+	if f.reference == nil {
+		return nil, walletapp.ErrNotFound
+	}
+	return f.reference, nil
+}
+
+func (f *fakeTransactionRepository) ExistsSuccessfulReversal(ctx context.Context, referenceTransactionID string) (bool, error) {
+	if f.alreadyReversedErr != nil {
+		return false, f.alreadyReversedErr
+	}
+	return f.alreadyReversed, nil
 }
 
 type fakeLedgerRepository struct {
