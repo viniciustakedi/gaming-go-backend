@@ -16,13 +16,14 @@ import (
 // Config holds every setting the service needs, grouped by the component
 // that owns it.
 type Config struct {
-	HTTP     HTTPConfig
-	Log      LogConfig
-	Postgres PostgresConfig
-	SQS      SQSConfig
-	Outbox   OutboxConfig
-	Auth     AuthConfig
-	Fx       FxConfig
+	HTTP            HTTPConfig
+	Log             LogConfig
+	Postgres        PostgresConfig
+	SQS             SQSConfig
+	Outbox          OutboxConfig
+	ReferenceWorker ReferenceWorkerConfig
+	Auth            AuthConfig
+	Fx              FxConfig
 }
 
 type HTTPConfig struct {
@@ -102,6 +103,20 @@ type OutboxConfig struct {
 	BatchSize    int
 	RetryBase    time.Duration
 	RetryMax     time.Duration
+}
+
+// ReferenceWorkerConfig controls durable retries for accepted operations
+// whose referenced transaction has not arrived yet.
+type ReferenceWorkerConfig struct {
+	Enabled         bool
+	PollInterval    time.Duration
+	Lease           time.Duration
+	BatchSize       int
+	RetryBase       time.Duration
+	RetryMax        time.Duration
+	MaxAttempts     int
+	TTL             time.Duration
+	ShutdownTimeout time.Duration
 }
 
 type FxConfig struct {
@@ -253,6 +268,19 @@ func Load() (Config, error) {
 		errs = append(errs, fmt.Errorf("OUTBOX_RETRY_MAX: must be greater than or equal to OUTBOX_RETRY_BASE"))
 	}
 
+	cfg.ReferenceWorker.Enabled = getBool("REFERENCE_WORKER_ENABLED", true, &errs)
+	cfg.ReferenceWorker.PollInterval = getDuration("REFERENCE_WORKER_POLL_INTERVAL", 250*time.Millisecond, &errs)
+	cfg.ReferenceWorker.Lease = getDuration("REFERENCE_WORKER_LEASE", 30*time.Second, &errs)
+	cfg.ReferenceWorker.BatchSize = getInt("REFERENCE_WORKER_BATCH_SIZE", 10, &errs)
+	cfg.ReferenceWorker.RetryBase = getDuration("REFERENCE_WORKER_RETRY_BASE", time.Second, &errs)
+	cfg.ReferenceWorker.RetryMax = getDuration("REFERENCE_WORKER_RETRY_MAX", time.Minute, &errs)
+	cfg.ReferenceWorker.MaxAttempts = getInt("REFERENCE_WORKER_MAX_ATTEMPTS", 10, &errs)
+	cfg.ReferenceWorker.TTL = getDuration("REFERENCE_WORKER_TTL", 24*time.Hour, &errs)
+	cfg.ReferenceWorker.ShutdownTimeout = getDuration("REFERENCE_WORKER_SHUTDOWN_TIMEOUT", 5*time.Second, &errs)
+	if cfg.ReferenceWorker.RetryMax < cfg.ReferenceWorker.RetryBase {
+		errs = append(errs, fmt.Errorf("REFERENCE_WORKER_RETRY_MAX: must be greater than or equal to REFERENCE_WORKER_RETRY_BASE"))
+	}
+
 	cfg.Auth.IssuerURL = getEnv("AUTH_ISSUER_URL", "")
 	if cfg.Auth.IssuerURL == "" {
 		errs = append(errs, errors.New("AUTH_ISSUER_URL: required"))
@@ -280,7 +308,7 @@ func Load() (Config, error) {
 	// budget (spec: "fx.StopTimeout configurado acima da soma dos prazos
 	// internos"). Extend this sum if a future stop hook gains its own
 	// configurable deadline.
-	internalStopDeadline := cfg.HTTP.ShutdownTimeout + cfg.SQS.Consumer.ShutdownTimeout + SQSConsumerPostCancelDrain
+	internalStopDeadline := cfg.HTTP.ShutdownTimeout + cfg.SQS.Consumer.ShutdownTimeout + SQSConsumerPostCancelDrain + cfg.ReferenceWorker.ShutdownTimeout
 	if cfg.Fx.StopTimeout <= internalStopDeadline {
 		errs = append(errs, fmt.Errorf("FX_STOP_TIMEOUT: must be greater than the sum of internal stop deadlines (%s), got %s", internalStopDeadline, cfg.Fx.StopTimeout))
 	}

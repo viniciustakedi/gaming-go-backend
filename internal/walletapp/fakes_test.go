@@ -105,6 +105,9 @@ type fakeTransactionRepository struct {
 	byExternalErr           error
 	reference               *domainwallet.WagerTransaction
 	referenceErr            error
+	pending                 *walletapp.PendingReferenceTransaction
+	pendingErr              error
+	insertPendingExpiresAt  time.Time
 	alreadyReversed         bool
 	alreadyReversedErr      error
 	detailByID              *walletapp.TransactionDetail
@@ -153,6 +156,15 @@ func (f *fakeTransactionRepository) InsertNew(ctx context.Context, t *domainwall
 	return true, nil
 }
 
+func (f *fakeTransactionRepository) InsertPending(ctx context.Context, t *domainwallet.WagerTransaction, nextAttemptAt time.Time, ttl time.Duration) (time.Time, bool, error) {
+	expiresAt := f.insertPendingExpiresAt
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().Add(ttl)
+	}
+	inserted, err := f.InsertNew(ctx, t, nil)
+	return expiresAt, inserted, err
+}
+
 func (f *fakeTransactionRepository) FindByIdempotencyKey(ctx context.Context, providerID, idempotencyKey string) (*walletapp.ExistingTransaction, error) {
 	if f.byIdempotencyKeyErr != nil {
 		return nil, f.byIdempotencyKeyErr
@@ -188,6 +200,22 @@ func (f *fakeTransactionRepository) ExistsSuccessfulReversal(ctx context.Context
 		return false, f.alreadyReversedErr
 	}
 	return f.alreadyReversed, nil
+}
+
+func (f *fakeTransactionRepository) FindPendingForUpdate(ctx context.Context, transactionID string) (*walletapp.PendingReferenceTransaction, error) {
+	if f.pendingErr != nil {
+		return nil, f.pendingErr
+	}
+	if f.pending != nil {
+		return f.pending, nil
+	}
+	return nil, walletapp.ErrNotFound
+}
+func (f *fakeTransactionRepository) ReschedulePending(ctx context.Context, transactionID string, attempts int, retryDelay time.Duration) error {
+	return nil
+}
+func (f *fakeTransactionRepository) CompletePending(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error {
+	return nil
 }
 
 func (f *fakeTransactionRepository) FindDetailByID(ctx context.Context, id string) (*walletapp.TransactionDetail, error) {

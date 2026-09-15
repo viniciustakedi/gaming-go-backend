@@ -16,6 +16,7 @@ import (
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/app"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/httpapi"
+	"github.com/viniciustakedi/jungle-gaming-wallet/internal/referenceworker"
 	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
@@ -31,6 +32,7 @@ type appHarness struct {
 	pool       *pgxpool.Pool
 	adminToken string
 	fxApp      *fxtest.App
+	worker     *referenceworker.Worker
 	stopped    bool
 }
 
@@ -51,7 +53,8 @@ func newAppHarness(t *testing.T) *appHarness {
 
 	var server *httpapi.Server
 	var pool *pgxpool.Pool
-	fxApp := fxtest.New(t, app.Modules, fx.Populate(&server, &pool))
+	var worker *referenceworker.Worker
+	fxApp := fxtest.New(t, app.Modules, fx.Populate(&server, &pool, &worker))
 	fxApp.RequireStart()
 	h := &appHarness{
 		baseURL:    "http://" + server.Addr(),
@@ -59,6 +62,7 @@ func newAppHarness(t *testing.T) *appHarness {
 		pool:       pool,
 		adminToken: fetchToken(t, walletServiceClient()),
 		fxApp:      fxApp,
+		worker:     worker,
 	}
 	t.Cleanup(func() {
 		if !h.stopped {

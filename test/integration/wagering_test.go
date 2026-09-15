@@ -25,7 +25,6 @@ import (
 // are all in scope here (ticket 10) - only a reference that has not arrived
 // yet, or is itself still PENDING_REFERENCE, is out of scope, left for
 // ticket 11's durable PENDING_REFERENCE persistence and retry worker (see
-// process_operation.go's ErrOperationNotSupported and
 // wagering_reversals_test.go).
 
 // wageringHTTPResponse, wageringBodyInput and wageringBody are

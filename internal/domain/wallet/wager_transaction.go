@@ -176,6 +176,17 @@ func (t *WagerTransaction) MarkPendingReference(at time.Time) error {
 	return t.transition(PendingReference, "", at)
 }
 
+// ResolveReference records the immutable internal identity once a pending
+// operation finds the external reference it was waiting for. It is confined
+// to PENDING_REFERENCE so a terminal audit record can never be retargeted.
+func (t *WagerTransaction) ResolveReference(referenceTransactionID string) error {
+	if t == nil || t.status != PendingReference || referenceTransactionID == "" || t.referenceTransactionID != "" {
+		return transactionError(ErrInvalidTransition)
+	}
+	t.referenceTransactionID = referenceTransactionID
+	return nil
+}
+
 func (t *WagerTransaction) transition(next TransactionStatus, failureCode string, at time.Time) error {
 	if t == nil || at.IsZero() {
 		return transactionError(ErrInvalidTransition)

@@ -55,6 +55,17 @@ func TestSQSConsumer_BetAndRedelivery_DebitsOnce(t *testing.T) {
 	sendWagerMessage(t, client, wallet.ID, "delivery-1-"+uniqueID("dedup"), body)
 	waitForBalance(t, h, wallet.ID, 7000)
 	waitForWageringOperationsMetric(t, h, "SQS", "BET", "PROCESSED", operationsBefore+1)
+	var sqsTransactionID string
+	requireNoError(t, h.pool.QueryRow(ctx, `SELECT id FROM wager_transactions WHERE external_transaction_id = $1`, bodyInput.ExternalID).Scan(&sqsTransactionID), "read SQS transaction")
+	events := queryOutboxEvents(t, ctx, h, sqsTransactionID)
+	if len(events) != 1 {
+		t.Fatalf("SQS transaction events = %+v, want one processed event", events)
+	}
+	var event eventEnvelopeJSON
+	requireNoError(t, json.Unmarshal(events[0].payload, &event), "decode SQS event")
+	if event.CorrelationID != messageID || event.CausationID != messageID {
+		t.Errorf("SQS event correlation/causation = %q/%q, want %q/%q", event.CorrelationID, event.CausationID, messageID, messageID)
+	}
 
 	// A new SQS message carrying the same operation must be an operation
 	// replay, distinct from an inbox redelivery of the exact same messageId.
@@ -100,6 +111,89 @@ func TestSQSConsumer_BetAndRedelivery_DebitsOnce(t *testing.T) {
 	}
 	if got := countLedgerEntries(t, ctx, h, httpWallet.ID); got != 2 {
 		t.Errorf("ledger entries = %d, want 2", got)
+	}
+}
+
+func TestSQSConsumer_RefundBeforeBet_IsCommittedPendingThenCompleted(t *testing.T) {
+	t.Setenv("SQS_CONSUMER_ENABLED", "true")
+	t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")
+	h := newAppHarness(t)
+	ctx := context.Background()
+	wallet := openWalletHTTP(t, h, "100.00")
+	round := uniqueID("round")
+	betExternalID := uniqueID("bet")
+	messageID := uniqueID("pending-refund-message")
+	refundExternalID := uniqueID("refund")
+	ref := betExternalID
+	refund := wageringBodyInput{ProviderID: "provider-a", ExternalID: refundExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: round, GameID: "game-1", Kind: "REFUND", Amount: "30.00", Currency: testCurrency, ReferenceID: &ref}
+	creds := loadTestCreds(t)
+	sendWagerMessage(t, sqsClient(t, creds.gatewayKey, creds.gatewaySecret), wallet.ID, "pending-refund-"+uniqueID("dedup"), sqsWagerEnvelope(t, messageID, refund, "idem-"+uniqueID("key")))
+	waitForInbox(t, h, messageID)
+
+	var pendingID, status string
+	requireNoError(t, h.pool.QueryRow(ctx, `SELECT id, status FROM wager_transactions WHERE external_transaction_id = $1`, refundExternalID).Scan(&pendingID, &status), "read SQS pending refund")
+	if status != "PENDING_REFERENCE" {
+		t.Fatalf("SQS refund status = %s, want PENDING_REFERENCE", status)
+	}
+
+	betResp, betBody := doWagering(t, h, providerAToken(t), wageringBodyInput{ProviderID: "provider-a", ExternalID: betExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: round, GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency}, "idem-"+uniqueID("key"), "")
+	if betResp.StatusCode != http.StatusOK {
+		t.Fatalf("BET status = %d, want 200, body = %s", betResp.StatusCode, betBody)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		requireNoError(t, h.pool.QueryRow(ctx, `SELECT status FROM wager_transactions WHERE id = $1`, pendingID).Scan(&status), "read SQS pending refund completion")
+		if status == "PROCESSED" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if status != "PROCESSED" {
+		t.Fatalf("SQS refund status after reference = %s, want PROCESSED", status)
+	}
+	if balance, _, found := queryWalletRow(t, ctx, h, wallet.ID); !found || balance != 10000 {
+		t.Errorf("wallet balance = %d (found %v), want 10000", balance, found)
+	}
+}
+
+func TestSQSConsumer_RollbackAndWinBeforeBet_AreCommittedPendingThenCompleted(t *testing.T) {
+	for _, kind := range []string{"ROLLBACK", "WIN"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("SQS_CONSUMER_ENABLED", "true")
+			t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")
+			t.Setenv("REFERENCE_WORKER_POLL_INTERVAL", "20ms")
+			h := newAppHarness(t)
+			ctx := context.Background()
+			wallet := openWalletHTTP(t, h, "100.00")
+			round, betExternalID, messageID := uniqueID("round"), uniqueID("bet"), uniqueID("pending-message")
+			ref := betExternalID
+			pending := wageringBodyInput{ProviderID: "provider-a", ExternalID: uniqueID("pending"), PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: round, GameID: "game-1", Kind: kind, Amount: "30.00", Currency: testCurrency, ReferenceID: &ref}
+			sendWagerMessage(t, sqsClient(t, loadTestCreds(t).gatewayKey, loadTestCreds(t).gatewaySecret), wallet.ID, "pending-"+uniqueID("dedup"), sqsWagerEnvelope(t, messageID, pending, "idem-"+uniqueID("key")))
+			waitForInbox(t, h, messageID)
+			var pendingID, status string
+			requireNoError(t, h.pool.QueryRow(ctx, `SELECT id, status FROM wager_transactions WHERE external_transaction_id = $1`, pending.ExternalID).Scan(&pendingID, &status), "read SQS pending operation")
+			if status != "PENDING_REFERENCE" {
+				t.Fatalf("SQS %s status = %s, want PENDING_REFERENCE", kind, status)
+			}
+			betResp, betBody := doWagering(t, h, providerAToken(t), wageringBodyInput{ProviderID: "provider-a", ExternalID: betExternalID, PlayerID: wallet.PlayerID, WalletID: wallet.ID, RoundID: round, GameID: "game-1", Kind: "BET", Amount: "30.00", Currency: testCurrency}, "idem-"+uniqueID("key"), "")
+			if betResp.StatusCode != http.StatusOK {
+				t.Fatalf("BET status = %d, want 200, body = %s", betResp.StatusCode, betBody)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				requireNoError(t, h.pool.QueryRow(ctx, `SELECT status FROM wager_transactions WHERE id = $1`, pendingID).Scan(&status), "read SQS pending completion")
+				if status == "PROCESSED" {
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if status != "PROCESSED" {
+				t.Fatalf("SQS %s after reference = %s, want PROCESSED", kind, status)
+			}
+			if balance, _, found := queryWalletRow(t, ctx, h, wallet.ID); !found || balance != 10000 {
+				t.Errorf("SQS %s wallet balance = %d (found %v), want 10000", kind, balance, found)
+			}
+		})
 	}
 }
 
@@ -389,7 +483,11 @@ func TestSQSConsumer_StopWaitsForLongPollAndLeavesLaterMessageVisible(t *testing
 
 func sqsWagerEnvelope(t *testing.T, messageID string, in wageringBodyInput, key string) []byte {
 	t.Helper()
-	payload := map[string]any{"messageId": messageID, "type": "WagerTransactionRequested", "occurredAt": "2026-09-15T00:00:00Z", "data": map[string]any{"providerId": in.ProviderID, "externalTransactionId": in.ExternalID, "idempotencyKey": key, "playerId": in.PlayerID, "walletId": in.WalletID, "roundId": in.RoundID, "gameId": in.GameID, "kind": in.Kind, "money": map[string]string{"amount": in.Amount, "currency": in.Currency}}}
+	data := map[string]any{"providerId": in.ProviderID, "externalTransactionId": in.ExternalID, "idempotencyKey": key, "playerId": in.PlayerID, "walletId": in.WalletID, "roundId": in.RoundID, "gameId": in.GameID, "kind": in.Kind, "money": map[string]string{"amount": in.Amount, "currency": in.Currency}}
+	if in.ReferenceID != nil {
+		data["referenceExternalTransactionId"] = *in.ReferenceID
+	}
+	payload := map[string]any{"messageId": messageID, "type": "WagerTransactionRequested", "occurredAt": "2026-09-15T00:00:00Z", "data": data}
 	encoded, err := json.Marshal(payload)
 	requireNoError(t, err, "marshal SQS wager envelope")
 	return encoded

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	domainwallet "github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/wallet"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletapp"
@@ -58,6 +59,10 @@ func (fakeNoopTransactionRepository) InsertNew(ctx context.Context, t *domainwal
 	return true, nil
 }
 
+func (fakeNoopTransactionRepository) InsertPending(ctx context.Context, t *domainwallet.WagerTransaction, nextAttemptAt time.Time, ttl time.Duration) (time.Time, bool, error) {
+	return nextAttemptAt.Add(ttl), true, nil
+}
+
 func (fakeNoopTransactionRepository) FindByIdempotencyKey(ctx context.Context, providerID, idempotencyKey string) (*walletapp.ExistingTransaction, error) {
 	return nil, walletapp.ErrNotFound
 }
@@ -72,6 +77,18 @@ func (fakeNoopTransactionRepository) FindReference(ctx context.Context, provider
 
 func (fakeNoopTransactionRepository) ExistsSuccessfulReversal(ctx context.Context, referenceTransactionID string) (bool, error) {
 	return false, nil
+}
+
+func (fakeNoopTransactionRepository) FindPendingForUpdate(ctx context.Context, transactionID string) (*walletapp.PendingReferenceTransaction, error) {
+	return nil, walletapp.ErrNotFound
+}
+
+func (fakeNoopTransactionRepository) ReschedulePending(ctx context.Context, transactionID string, attempts int, retryDelay time.Duration) error {
+	return nil
+}
+
+func (fakeNoopTransactionRepository) CompletePending(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error {
+	return nil
 }
 
 func (fakeNoopTransactionRepository) FindDetailByID(ctx context.Context, id string) (*walletapp.TransactionDetail, error) {

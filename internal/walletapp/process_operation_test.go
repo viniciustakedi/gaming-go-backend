@@ -304,36 +304,56 @@ func TestProcessOperationUseCase_ReferenceForbiddenOnBet_Correctable(t *testing.
 	}
 }
 
-// TestProcessOperationUseCase_WinWithReference_MissingReference_NotSupportedByThisTicket
-// covers this ticket's own documented boundary: a reference that has not
-// arrived at all still answers ErrOperationNotSupported, but only once
-// ExecuteInTx has actually looked for it inside the wallet-locked
-// transaction - unlike ticket 08's blanket rejection, Prepare alone can no
-// longer tell a genuinely resolvable reference apart from a missing one.
-func TestProcessOperationUseCase_WinWithReference_MissingReference_NotSupportedByThisTicket(t *testing.T) {
+func TestProcessOperationUseCase_WinWithReference_MissingReference_PersistsPending(t *testing.T) {
 	t.Parallel()
 	h := newProcessHarness(testWallet(t, "100.00", 1))
+	wantExpiry := time.Date(2026, time.September, 16, 12, 0, 0, 0, time.UTC)
+	h.transactions.insertPendingExpiresAt = wantExpiry
 	ref := "bet-ref"
 	req := testRequest(t, domainwallet.Win, "10.00")
 	req.ReferenceExternalTransactionID = &ref
 
-	_, err := h.process(t, req, testIdempKey)
-	if !errors.Is(err, walletapp.ErrOperationNotSupported) {
-		t.Errorf("err = %v, want ErrOperationNotSupported", err)
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result.Status != domainwallet.PendingReference {
+		t.Errorf("Status = %q, want PENDING_REFERENCE", result.Status)
+	}
+	if result.PendingExpiresAt == nil || !result.PendingExpiresAt.Equal(wantExpiry) {
+		t.Errorf("PendingExpiresAt = %v, want database value %s", result.PendingExpiresAt, wantExpiry)
 	}
 	if h.uow.calls != 1 {
 		t.Errorf("UnitOfWork.WithinTx calls = %d, want 1 - resolving the reference needs the wallet-locked transaction", h.uow.calls)
 	}
-	if len(h.transactions.inserted) != 0 {
-		t.Errorf("transactions inserted = %d, want 0 - an unresolved reference must persist nothing", len(h.transactions.inserted))
+	if len(h.transactions.inserted) != 1 || h.transactions.inserted[0].Status() != domainwallet.PendingReference {
+		t.Errorf("transactions = %+v, want one PENDING_REFERENCE", h.transactions.inserted)
+	}
+	if len(h.outbox.inserted) != 1 || h.outbox.inserted[0].eventType != domainwallet.WagerTransactionPendingReferenceEventType {
+		t.Errorf("outbox = %+v, want WagerTransactionPendingReference", h.outbox.inserted)
 	}
 }
 
-// TestProcessOperationUseCase_Refund_ReferencePendingReference_NotSupportedByThisTicket
-// covers the other WaitForReference case: the reference exists but has not
-// itself reached a terminal status yet (spec: "referência existe, mas está
-// PENDING_REFERENCE: a operação continua esperando").
-func TestProcessOperationUseCase_Refund_ReferencePendingReference_NotSupportedByThisTicket(t *testing.T) {
+func TestProcessOperationUseCase_ResumePendingUsesDatabaseExpiry(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "100.00", 1))
+	pending := testReferenceTransaction(t, "pending-tx", domainwallet.Refund, domainwallet.PendingReference, testWalletID, testPlayerID, testRound, "30.00")
+	h.transactions.pending = &walletapp.PendingReferenceTransaction{
+		Transaction: pending, Attempts: 0,
+		PendingExpiresAt: time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC),
+		Expired:          false,
+	}
+
+	outcome, err := h.useCase.ResumePending(context.Background(), pending.ID(), testWalletID, walletapp.PendingResumeSettings{MaxAttempts: 3, RetryDelay: time.Second})
+	if err != nil {
+		t.Fatalf("ResumePending() error = %v", err)
+	}
+	if outcome != walletapp.PendingRescheduled {
+		t.Errorf("ResumePending() outcome = %q, want rescheduled from database expiry flag", outcome)
+	}
+}
+
+func TestProcessOperationUseCase_Refund_ReferencePendingReference_PersistsPending(t *testing.T) {
 	t.Parallel()
 	h := newProcessHarness(testWallet(t, "100.00", 1))
 	h.transactions.reference = testReferenceTransaction(t, "bet-tx", domainwallet.Bet, domainwallet.PendingReference, testWalletID, testPlayerID, testRound, "30.00")
@@ -341,12 +361,35 @@ func TestProcessOperationUseCase_Refund_ReferencePendingReference_NotSupportedBy
 	ref := "bet-ref"
 	req.ReferenceExternalTransactionID = &ref
 
-	_, err := h.process(t, req, testIdempKey)
-	if !errors.Is(err, walletapp.ErrOperationNotSupported) {
-		t.Errorf("err = %v, want ErrOperationNotSupported", err)
+	result, err := h.process(t, req, testIdempKey)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
 	}
-	if len(h.transactions.inserted) != 0 {
-		t.Errorf("transactions inserted = %d, want 0 - a still-pending reference must persist nothing", len(h.transactions.inserted))
+	if result.Status != domainwallet.PendingReference {
+		t.Errorf("Status = %q, want PENDING_REFERENCE", result.Status)
+	}
+	if len(h.transactions.inserted) != 1 || h.transactions.inserted[0].Status() != domainwallet.PendingReference {
+		t.Errorf("transactions = %+v, want one PENDING_REFERENCE", h.transactions.inserted)
+	}
+}
+
+func TestProcessOperationUseCase_FailPending_MarksFailedWithoutFinancialEffect(t *testing.T) {
+	t.Parallel()
+	h := newProcessHarness(testWallet(t, "100.00", 1))
+	pending := testReferenceTransaction(t, "pending-tx", domainwallet.Refund, domainwallet.PendingReference, testWalletID, testPlayerID, testRound, "30.00")
+	h.transactions.pending = &walletapp.PendingReferenceTransaction{Transaction: pending, Attempts: 2, PendingExpiresAt: time.Now().Add(time.Hour)}
+
+	if err := h.useCase.FailPending(context.Background(), pending.ID(), testWalletID); err != nil {
+		t.Fatalf("FailPending() error = %v", err)
+	}
+	if pending.Status() != domainwallet.Failed || pending.FailureCode() != string(operation.CodePermanentProcessingFailure) {
+		t.Errorf("pending = %s/%s, want FAILED/PERMANENT_PROCESSING_FAILURE", pending.Status(), pending.FailureCode())
+	}
+	if len(h.ledger.inserted) != 0 || len(h.wallets.updated) != 0 {
+		t.Errorf("financial writes = ledger %d, wallets %d; want none", len(h.ledger.inserted), len(h.wallets.updated))
+	}
+	if len(h.outbox.inserted) != 0 {
+		t.Errorf("outbox = %+v, want no FAILED event", h.outbox.inserted)
 	}
 }
 
@@ -835,7 +878,7 @@ func TestProcessOperationUseCase_Prepare_ReferenceForbiddenOnBet(t *testing.T) {
 // from a missing one - it has no database access - so a WIN naming a
 // reference always comes back as a preliminary WaitForReference decision,
 // not an error; ExecuteInTx's resolveDecision is what turns this into a
-// final Process, Reject or ErrOperationNotSupported once it can actually
+// final Process, Reject or durable PENDING_REFERENCE once it can actually
 // look the reference up.
 func TestProcessOperationUseCase_Prepare_WinWithReference_ReturnsWaitForReferenceDecision(t *testing.T) {
 	t.Parallel()

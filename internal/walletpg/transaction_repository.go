@@ -60,6 +60,22 @@ func (r *transactionRepository) InsertNew(ctx context.Context, t *domainwallet.W
 	return tag.RowsAffected() == 1, nil
 }
 
+func (r *transactionRepository) InsertPending(ctx context.Context, t *domainwallet.WagerTransaction, nextAttemptAt time.Time, ttl time.Duration) (time.Time, bool, error) {
+	fields, err := transactionFields(t, nil)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	fields = append(fields, nextAttemptAt, ttl.String())
+	var expiresAt time.Time
+	if err := r.q.QueryRow(ctx, insertPendingWagerTransactionSQL+" ON CONFLICT DO NOTHING RETURNING pending_expires_at", fields...).Scan(&expiresAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, fmt.Errorf("walletpg: insert pending wager transaction: %w", err)
+	}
+	return expiresAt, true, nil
+}
+
 const insertWagerTransactionSQL = `
 	INSERT INTO wager_transactions (
 		id, external_transaction_id, provider_id, idempotency_key, payload_hash,
@@ -67,6 +83,14 @@ const insertWagerTransactionSQL = `
 		reference_external_transaction_id, reference_transaction_id, status, failure_code,
 		resulting_balance, created_at, updated_at
 	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`
+
+const insertPendingWagerTransactionSQL = `
+	INSERT INTO wager_transactions (
+		id, external_transaction_id, provider_id, idempotency_key, payload_hash,
+		wallet_id, player_id, round_id, game_id, kind, origin, amount, currency,
+		reference_external_transaction_id, reference_transaction_id, status, failure_code,
+		resulting_balance, created_at, updated_at, next_attempt_at, pending_expires_at
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,now() + $22::interval)`
 
 // transactionFields builds insertWagerTransactionSQL's positional arguments
 // from a domain transaction, mirroring WagerTransaction.validate(): an
@@ -120,14 +144,14 @@ func transactionFields(t *domainwallet.WagerTransaction, resultingBalance *int64
 // provider_id is always NULL, so neither can ever match one.
 func (r *transactionRepository) FindByIdempotencyKey(ctx context.Context, providerID, idempotencyKey string) (*walletapp.ExistingTransaction, error) {
 	return r.findExisting(ctx, `
-		SELECT id, external_transaction_id, idempotency_key, payload_hash, status, failure_code, resulting_balance, currency
+		SELECT id, external_transaction_id, idempotency_key, payload_hash, status, failure_code, resulting_balance, currency, pending_expires_at
 		FROM wager_transactions
 		WHERE provider_id = $1 AND idempotency_key = $2`, providerID, idempotencyKey)
 }
 
 func (r *transactionRepository) FindByExternalTransactionID(ctx context.Context, providerID, externalTransactionID string) (*walletapp.ExistingTransaction, error) {
 	return r.findExisting(ctx, `
-		SELECT id, external_transaction_id, idempotency_key, payload_hash, status, failure_code, resulting_balance, currency
+		SELECT id, external_transaction_id, idempotency_key, payload_hash, status, failure_code, resulting_balance, currency, pending_expires_at
 		FROM wager_transactions
 		WHERE provider_id = $1 AND external_transaction_id = $2`, providerID, externalTransactionID)
 }
@@ -139,8 +163,9 @@ func (r *transactionRepository) findExisting(ctx context.Context, sql, providerI
 		id, externalTransactionID, idempotencyKey, payloadHash, status, currency string
 		failureCode                                                              *string
 		resultingBalance                                                         *int64
+		pendingExpiresAt                                                         *time.Time
 	)
-	if err := row.Scan(&id, &externalTransactionID, &idempotencyKey, &payloadHash, &status, &failureCode, &resultingBalance, &currency); err != nil {
+	if err := row.Scan(&id, &externalTransactionID, &idempotencyKey, &payloadHash, &status, &failureCode, &resultingBalance, &currency, &pendingExpiresAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, walletapp.ErrNotFound
 		}
@@ -149,7 +174,7 @@ func (r *transactionRepository) findExisting(ctx context.Context, sql, providerI
 
 	record := &walletapp.ExistingTransaction{
 		TransactionID: id, IdempotencyKey: idempotencyKey, PayloadHash: payloadHash, ExternalTransactionID: externalTransactionID,
-		Status: domainwallet.TransactionStatus(status), ResultingBalance: resultingBalance, Currency: money.Currency(currency),
+		Status: domainwallet.TransactionStatus(status), ResultingBalance: resultingBalance, Currency: money.Currency(currency), PendingExpiresAt: pendingExpiresAt,
 	}
 	if failureCode != nil {
 		record.FailureCode = *failureCode
@@ -213,7 +238,7 @@ func (r *transactionRepository) FindReference(ctx context.Context, providerID, r
 
 	transaction, err := domainwallet.RehydrateTransaction(input)
 	if err != nil {
-		return nil, fmt.Errorf("walletpg: rehydrate reference transaction: %w", err)
+		return nil, fmt.Errorf("walletpg: rehydrate reference transaction: %w: %w", walletapp.ErrInvalidPersistedTransaction, err)
 	}
 	return transaction, nil
 }
@@ -234,6 +259,89 @@ func (r *transactionRepository) ExistsSuccessfulReversal(ctx context.Context, re
 		return false, fmt.Errorf("walletpg: check successful reversal: %w", err)
 	}
 	return exists, nil
+}
+
+func (r *transactionRepository) FindPendingForUpdate(ctx context.Context, transactionID string) (*walletapp.PendingReferenceTransaction, error) {
+	row := r.q.QueryRow(ctx, `
+		SELECT id, external_transaction_id, provider_id, idempotency_key, payload_hash,
+			wallet_id, player_id, round_id, game_id, kind, origin, amount, currency,
+			reference_external_transaction_id, reference_transaction_id, status, failure_code,
+			attempts, pending_expires_at, pending_expires_at <= now(), created_at, updated_at
+		FROM wager_transactions WHERE id = $1 FOR UPDATE`, transactionID)
+	var (
+		id, externalID, providerID, idempotencyKey, payloadHash     string
+		walletID, playerID, roundID, gameID, kind, origin, currency string
+		amount                                                      int64
+		referenceExternalID, referenceTransactionID, failureCode    *string
+		status                                                      string
+		attempts                                                    int
+		expiresAt, createdAt, updatedAt                             time.Time
+		expired                                                     bool
+	)
+	if err := row.Scan(&id, &externalID, &providerID, &idempotencyKey, &payloadHash,
+		&walletID, &playerID, &roundID, &gameID, &kind, &origin, &amount, &currency,
+		&referenceExternalID, &referenceTransactionID, &status, &failureCode,
+		&attempts, &expiresAt, &expired, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, walletapp.ErrNotFound
+		}
+		return nil, fmt.Errorf("walletpg: lock pending wager transaction: %w", err)
+	}
+	value, err := money.New(amount, money.Currency(currency))
+	if err != nil {
+		return nil, fmt.Errorf("walletpg: decode pending transaction amount: %w", err)
+	}
+	input := domainwallet.RehydratedTransaction{ID: id, ExternalTransactionID: externalID, ProviderID: providerID, IdempotencyKey: idempotencyKey, PayloadHash: payloadHash, WalletID: walletID, PlayerID: playerID, RoundID: roundID, GameID: gameID, Kind: domainwallet.WagerKind(kind), Origin: domainwallet.TransactionOrigin(origin), Money: value, Status: domainwallet.TransactionStatus(status), CreatedAt: createdAt, UpdatedAt: updatedAt}
+	if referenceExternalID != nil {
+		input.ReferenceExternalTransactionID = *referenceExternalID
+	}
+	if referenceTransactionID != nil {
+		input.ReferenceTransactionID = *referenceTransactionID
+	}
+	if failureCode != nil {
+		input.FailureCode = *failureCode
+	}
+	transaction, err := domainwallet.RehydrateTransaction(input)
+	if err != nil {
+		return nil, fmt.Errorf("walletpg: rehydrate pending transaction: %w: %w", walletapp.ErrInvalidPersistedTransaction, err)
+	}
+	return &walletapp.PendingReferenceTransaction{Transaction: transaction, Attempts: attempts, PendingExpiresAt: expiresAt, Expired: expired}, nil
+}
+
+func (r *transactionRepository) ReschedulePending(ctx context.Context, transactionID string, attempts int, retryDelay time.Duration) error {
+	tag, err := r.q.Exec(ctx, `UPDATE wager_transactions SET attempts = $2, next_attempt_at = now() + $3::interval, updated_at = now() WHERE id = $1 AND status = 'PENDING_REFERENCE'`, transactionID, attempts, retryDelay.String())
+	if err != nil {
+		return fmt.Errorf("walletpg: reschedule pending wager transaction: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return walletapp.ErrNotFound
+	}
+	return nil
+}
+
+func (r *transactionRepository) CompletePending(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error {
+	if t == nil {
+		return errors.New("walletpg: complete nil pending transaction")
+	}
+	var referenceID, failureCode *string
+	if t.ReferenceTransactionID() != "" {
+		referenceID = strPtr(t.ReferenceTransactionID())
+	}
+	if t.FailureCode() != "" {
+		failureCode = strPtr(t.FailureCode())
+	}
+	tag, err := r.q.Exec(ctx, `
+		UPDATE wager_transactions
+		SET reference_transaction_id = $2, status = $3, failure_code = $4,
+			resulting_balance = $5, next_attempt_at = NULL, pending_expires_at = NULL, updated_at = $6
+		WHERE id = $1 AND status = 'PENDING_REFERENCE'`, t.ID(), referenceID, t.Status(), failureCode, resultingBalance, t.UpdatedAt())
+	if err != nil {
+		return fmt.Errorf("walletpg: complete pending wager transaction: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return walletapp.ErrNotFound
+	}
+	return nil
 }
 
 // transactionDetailColumns backs both FindDetailByID and

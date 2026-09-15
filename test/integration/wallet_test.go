@@ -43,6 +43,7 @@ type eventEnvelopeJSON struct {
 	EventType     string `json:"eventType"`
 	AggregateID   string `json:"aggregateId"`
 	CorrelationID string `json:"correlationId"`
+	CausationID   string `json:"causationId"`
 	OccurredAt    string `json:"occurredAt"`
 	Version       int    `json:"version"`
 }

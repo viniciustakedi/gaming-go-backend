@@ -56,11 +56,12 @@ type WalletHTTPResponse struct {
 // WageringHTTPResponse mirrors internal/httpapi's response body for
 // POST /wagering/transactions.
 type WageringHTTPResponse struct {
-	TransactionID    string    `json:"transactionId"`
-	Status           string    `json:"status"`
-	FailureCode      string    `json:"failureCode"`
-	Balance          MoneyJSON `json:"balance"`
-	IdempotentReplay bool      `json:"idempotentReplay"`
+	TransactionID    string     `json:"transactionId"`
+	Status           string     `json:"status"`
+	FailureCode      string     `json:"failureCode"`
+	Balance          MoneyJSON  `json:"balance"`
+	PendingExpiresAt *time.Time `json:"pendingExpiresAt"`
+	IdempotentReplay bool       `json:"idempotentReplay"`
 }
 
 // WageringBodyInput is the input to WageringBody - every field the wagering

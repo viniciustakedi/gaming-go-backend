@@ -79,6 +79,18 @@ e o prazo de shutdown precisa cobrir o long poll mais o drain pós-cancelamento.
 `deploy/ministack/provision.sh` para a `RedrivePolicy` da fila, não pelo
 processo Go.
 
+## Referências fora de ordem
+
+`REFUND`, `ROLLBACK` e `WIN` com referência que chegam antes da operação
+referenciada recebem `202` e são persistidos como `PENDING_REFERENCE`. O
+worker configurado por `REFERENCE_WORKER_*` reclama lotes com `FOR UPDATE
+SKIP LOCKED` e um lease em `next_attempt_at`; assim instâncias paralelas não
+trabalham a mesma linha e uma queda só torna o registro elegível novamente.
+Ele usa backoff exponencial com jitter e encerra por TTL ou tentativas com o
+evento de rejeição auditável.
+`REFERENCE_WORKER_SHUTDOWN_TIMEOUT` limita o dreno no stop; `FX_STOP_TIMEOUT`
+é validado acima da soma desse orçamento e dos demais componentes.
+
 ## Variáveis de ambiente
 
 Ver `.env.example`. `docker compose` lê um `.env` na raiz automaticamente;

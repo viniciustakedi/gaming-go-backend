@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/auth"
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/money"
@@ -29,7 +30,8 @@ type wageringTransactionResponse struct {
 	TransactionID    string                         `json:"transactionId"`
 	Status           domainwallet.TransactionStatus `json:"status"`
 	FailureCode      string                         `json:"failureCode,omitempty"`
-	Balance          money.Money                    `json:"balance"`
+	Balance          *money.Money                   `json:"balance,omitempty"`
+	PendingExpiresAt *time.Time                     `json:"pendingExpiresAt,omitempty"`
 	IdempotentReplay bool                           `json:"idempotentReplay"`
 }
 
@@ -82,25 +84,6 @@ func wageringTransactionsHandler(useCase *walletapp.ProcessOperationUseCase, log
 				writeWageringError(w, opErr, nil)
 				return
 			}
-			if errors.Is(err, walletapp.ErrOperationNotSupported) {
-				// Not part of the spec's documented catalog: a REFUND,
-				// ROLLBACK or referenced WIN whose reference has not
-				// arrived yet, or has arrived but is itself still
-				// PENDING_REFERENCE, needs the durable PENDING_REFERENCE
-				// persistence and retry worker ticket 11 adds. Every
-				// reference that has actually arrived and reached a
-				// terminal status is resolved and evaluated by ticket 10
-				// instead of reaching this branch. Labelled plainly rather
-				// than guessed at, since no scenario in this ticket's scope
-				// exercises it beyond that one documented gap.
-				writeErrorEnvelope(w, http.StatusNotImplemented, errorBody{Error: errorDetail{
-					Code:        "REFERENCE_RESOLUTION_NOT_IMPLEMENTED",
-					Message:     "this operation kind requires reference resolution not implemented by this ticket",
-					Correctable: false,
-					Details:     []errorDetailItem{},
-				}})
-				return
-			}
 			logger.Error("process wagering operation failed", "correlationId", corrID, "providerId", req.ProviderID, "walletId", req.WalletID, "error", err)
 			writeWageringError(w, operation.ErrTemporarilyUnavailable, nil)
 			return
@@ -110,12 +93,18 @@ func wageringTransactionsHandler(useCase *walletapp.ProcessOperationUseCase, log
 		status := http.StatusOK
 		if result.Status == domainwallet.Rejected {
 			status = http.StatusUnprocessableEntity
+		} else if result.Status == domainwallet.PendingReference {
+			status = http.StatusAccepted
+		}
+		var balance *money.Money
+		if result.Status != domainwallet.PendingReference {
+			balance = &result.Balance
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if err := json.NewEncoder(w).Encode(wageringTransactionResponse{
 			TransactionID: result.TransactionID, Status: result.Status, FailureCode: result.FailureCode,
-			Balance: result.Balance, IdempotentReplay: result.IdempotentReplay,
+			Balance: balance, PendingExpiresAt: result.PendingExpiresAt, IdempotentReplay: result.IdempotentReplay,
 		}); err != nil {
 			// Headers and the status line are already written, so this can
 			// only be logged, never turned into a different response.
