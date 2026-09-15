@@ -508,6 +508,7 @@ func TestOutboxEvents_PayloadImmutableFails(t *testing.T) {
 	conn := connectApp(t, ctx)
 	eventID := newUUID(t)
 	requireNoError(t, insertOutboxEvent(t, ctx, conn, eventID, newUUID(t), "WagerTransactionProcessed", `{"status":"PROCESSED"}`), "fixture: insert outbox event")
+	markOutboxEventPublishedOnCleanup(t, eventID)
 
 	_, err := conn.Exec(ctx, `UPDATE outbox_events SET payload = '{"status":"TAMPERED"}'::jsonb WHERE event_id = $1`, eventID)
 	requireErrorCode(t, err, sqlstateRaiseException, "UPDATE of the outbox payload")
@@ -518,6 +519,7 @@ func TestOutboxEvents_EventTypeImmutableFails(t *testing.T) {
 	conn := connectApp(t, ctx)
 	eventID := newUUID(t)
 	requireNoError(t, insertOutboxEvent(t, ctx, conn, eventID, newUUID(t), "WagerTransactionProcessed", `{"status":"PROCESSED"}`), "fixture: insert outbox event")
+	markOutboxEventPublishedOnCleanup(t, eventID)
 
 	_, err := conn.Exec(ctx, `UPDATE outbox_events SET event_type = 'WagerTransactionRejected' WHERE event_id = $1`, eventID)
 	requireErrorCode(t, err, sqlstateRaiseException, "UPDATE of the outbox event_type")
@@ -528,6 +530,7 @@ func TestOutboxEvents_EventIDImmutableFails(t *testing.T) {
 	conn := connectApp(t, ctx)
 	eventID := newUUID(t)
 	requireNoError(t, insertOutboxEvent(t, ctx, conn, eventID, newUUID(t), "WagerTransactionProcessed", `{"status":"PROCESSED"}`), "fixture: insert outbox event")
+	markOutboxEventPublishedOnCleanup(t, eventID)
 
 	_, err := conn.Exec(ctx, `UPDATE outbox_events SET event_id = $1 WHERE event_id = $2`, newUUID(t), eventID)
 	requireErrorCode(t, err, sqlstateRaiseException, "UPDATE of the outbox event_id")
@@ -538,10 +541,27 @@ func TestOutboxEvents_PublishingLifecycleColumnsUpdateSucceeds(t *testing.T) {
 	conn := connectApp(t, ctx)
 	eventID := newUUID(t)
 	requireNoError(t, insertOutboxEvent(t, ctx, conn, eventID, newUUID(t), "WagerTransactionProcessed", `{"status":"PROCESSED"}`), "fixture: insert outbox event")
+	markOutboxEventPublishedOnCleanup(t, eventID)
 
 	_, err := conn.Exec(ctx, `
 		UPDATE outbox_events
 		SET attempts = attempts + 1, next_attempt_at = now(), locked_until = now(), published_at = now(), last_error = 'timeout'
 		WHERE event_id = $1`, eventID)
 	requireNoError(t, err, "updating the publishing-lifecycle columns of an outbox event")
+}
+
+func markOutboxEventPublishedOnCleanup(t *testing.T, eventID string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx := context.Background()
+		owner, err := pgx.Connect(ctx, ownerDSN(t))
+		if err != nil {
+			t.Errorf("connect migration owner to publish outbox fixture: %v", err)
+			return
+		}
+		defer owner.Close(ctx)
+		if _, err := owner.Exec(ctx, `UPDATE outbox_events SET published_at = now() WHERE event_id = $1`, eventID); err != nil {
+			t.Errorf("mark outbox fixture published: %v", err)
+		}
+	})
 }

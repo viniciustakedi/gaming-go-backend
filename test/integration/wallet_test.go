@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/money"
@@ -348,6 +350,65 @@ func TestOpenWallet_PositiveBalance_RecordsOpeningLedgerAndOutboxInSameCommit(t 
 		t.Errorf("WagerTransactionProcessed.data = %+v, want %+v", processed.Data, wantProcessedData)
 	}
 	requireNoExternalMetadata(t, processedEvents[0].payload)
+}
+
+// TestOpenWallet_PositiveBalance_PublishesCommittedOutboxSnapshots exercises
+// seam 3a end to end: the opening commit creates both durable snapshots, and
+// the events-reader receives exactly those snapshots from the output FIFO.
+func TestOpenWallet_PositiveBalance_PublishesCommittedOutboxSnapshots(t *testing.T) {
+	h := newAppHarness(t)
+	ctx := context.Background()
+	playerID := newUUID(t)
+
+	resp, body := h.do(t, http.MethodPost, "/wallets", nil, openWalletBody(playerID, "100.00", "BRL"))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /wallets status = %d, want 201, body = %s", resp.StatusCode, body)
+	}
+	wallet := decodeWalletResponse(t, body)
+	opening, found := queryOpeningTransaction(t, ctx, h, wallet.ID)
+	if !found {
+		t.Fatal("want OPENING transaction before observing published events")
+	}
+
+	expected := map[string]string{
+		"WalletBalanceChanged":      wallet.ID,
+		"WagerTransactionProcessed": opening.id,
+	}
+	readerCredentials := loadTestCreds(t)
+	reader := sqsClient(t, readerCredentials.eventsReaderKey, readerCredentials.eventsReaderSecret)
+	queueURL := queueURL(outputQueueName())
+	deadline := time.Now().Add(15 * time.Second)
+
+	for len(expected) > 0 && time.Now().Before(deadline) {
+		messages, err := reader.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+			QueueUrl: aws.String(queueURL), MaxNumberOfMessages: 10, WaitTimeSeconds: 2,
+		})
+		requireNoError(t, err, "receive published outbox events as events-reader")
+		for _, message := range messages.Messages {
+			if message.Body == nil {
+				continue
+			}
+			var envelope eventEnvelopeJSON
+			requireNoError(t, json.Unmarshal([]byte(*message.Body), &envelope), "decode published event envelope")
+			wantAggregateID, wanted := expected[envelope.EventType]
+			if !wanted || envelope.AggregateID != wantAggregateID {
+				continue
+			}
+
+			var snapshot []byte
+			requireNoError(t, h.pool.QueryRow(ctx, `SELECT payload FROM outbox_events WHERE event_id = $1`, envelope.EventID).Scan(&snapshot), "read committed outbox snapshot")
+			if got := *message.Body; got != string(snapshot) {
+				t.Errorf("published event %s differs from committed snapshot\n got: %s\nwant: %s", envelope.EventID, got, snapshot)
+			}
+			if _, err := reader.DeleteMessage(ctx, &sqs.DeleteMessageInput{QueueUrl: aws.String(queueURL), ReceiptHandle: message.ReceiptHandle}); err != nil {
+				t.Fatalf("delete observed event %s: %v", envelope.EventID, err)
+			}
+			delete(expected, envelope.EventType)
+		}
+	}
+	if len(expected) != 0 {
+		t.Fatalf("events not received from wallet-events.fifo before deadline: %v", expected)
+	}
 }
 
 func TestOpenWallet_ZeroBalance_CreatesOnlyTheWallet(t *testing.T) {

@@ -20,6 +20,7 @@ type Config struct {
 	Log      LogConfig
 	Postgres PostgresConfig
 	SQS      SQSConfig
+	Outbox   OutboxConfig
 	Fx       FxConfig
 }
 
@@ -69,6 +70,16 @@ type SQSConfig struct {
 	PublisherSecretAccessKey string
 
 	StartupTimeout time.Duration
+}
+
+// OutboxConfig bounds how much work one publisher claims and how long a
+// crashed publisher can hold that work before another instance resumes it.
+type OutboxConfig struct {
+	PollInterval time.Duration
+	Lease        time.Duration
+	BatchSize    int
+	RetryBase    time.Duration
+	RetryMax     time.Duration
 }
 
 type FxConfig struct {
@@ -166,6 +177,15 @@ func Load() (Config, error) {
 
 	cfg.SQS.StartupTimeout = getDuration("SQS_STARTUP_TIMEOUT", 10*time.Second, &errs)
 
+	cfg.Outbox.PollInterval = getDuration("OUTBOX_POLL_INTERVAL", 250*time.Millisecond, &errs)
+	cfg.Outbox.Lease = getDuration("OUTBOX_LEASE", 30*time.Second, &errs)
+	cfg.Outbox.BatchSize = getInt("OUTBOX_BATCH_SIZE", 10, &errs)
+	cfg.Outbox.RetryBase = getDuration("OUTBOX_RETRY_BASE", time.Second, &errs)
+	cfg.Outbox.RetryMax = getDuration("OUTBOX_RETRY_MAX", time.Minute, &errs)
+	if cfg.Outbox.RetryMax < cfg.Outbox.RetryBase {
+		errs = append(errs, fmt.Errorf("OUTBOX_RETRY_MAX: must be greater than or equal to OUTBOX_RETRY_BASE"))
+	}
+
 	cfg.Fx.StopTimeout = getDuration("FX_STOP_TIMEOUT", 30*time.Second, &errs)
 
 	// internalStopDeadline sums every stop-side deadline the shutdown
@@ -251,4 +271,17 @@ func getInt32(key string, fallback int32, errs *[]error) int32 {
 		return fallback
 	}
 	return int32(n)
+}
+
+func getInt(key string, fallback int, errs *[]error) int {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		*errs = append(*errs, fmt.Errorf("%s: invalid positive integer %q", key, v))
+		return fallback
+	}
+	return n
 }
