@@ -1,0 +1,122 @@
+package config
+
+import "testing"
+
+func TestLoad_MissingRequiredValues(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("SQS_ENDPOINT_URL", "")
+	t.Setenv("SQS_CONSUMER_ACCESS_KEY_ID", "")
+	t.Setenv("SQS_CONSUMER_SECRET_ACCESS_KEY", "")
+	t.Setenv("SQS_PUBLISHER_ACCESS_KEY_ID", "")
+	t.Setenv("SQS_PUBLISHER_SECRET_ACCESS_KEY", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("want error for missing required config, got nil")
+	}
+}
+
+func TestLoad_RejectsRootAccessKeys(t *testing.T) {
+	base := validEnv(t)
+
+	cases := map[string]string{
+		"literal test key": "test",
+		"12-digit key":     "000000000000",
+	}
+	for name, key := range cases {
+		t.Run(name, func(t *testing.T) {
+			for k, v := range base {
+				t.Setenv(k, v)
+			}
+			t.Setenv("SQS_CONSUMER_ACCESS_KEY_ID", key)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("want error for root-shaped access key %q, got nil", key)
+			}
+		})
+	}
+}
+
+func TestLoad_ValidEnvironment(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("want no error, got %v", err)
+	}
+	if cfg.Postgres.DSN != "postgres://user:pass@localhost:5432/wallet" {
+		t.Errorf("unexpected DSN: %q", cfg.Postgres.DSN)
+	}
+	if cfg.SQS.InputQueueName != "wager-transactions.fifo" {
+		t.Errorf("unexpected default input queue name: %q", cfg.SQS.InputQueueName)
+	}
+}
+
+func TestLoad_RejectsNonPositiveDurations(t *testing.T) {
+	cases := map[string]string{
+		"HTTP_READ_TIMEOUT":      "0s",
+		"HTTP_WRITE_TIMEOUT":     "-1s",
+		"HTTP_SHUTDOWN_TIMEOUT":  "0s",
+		"HTTP_READINESS_TIMEOUT": "-2s",
+		"DATABASE_PING_TIMEOUT":  "0s",
+		"SQS_STARTUP_TIMEOUT":    "-5s",
+		"FX_STOP_TIMEOUT":        "0s",
+	}
+	for key, value := range cases {
+		t.Run(key+"="+value, func(t *testing.T) {
+			for k, v := range validEnv(t) {
+				t.Setenv(k, v)
+			}
+			t.Setenv(key, value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("want error for non-positive %s=%q, got nil", key, value)
+			}
+		})
+	}
+}
+
+func TestLoad_RejectsInsufficientStopTimeout(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+	// HTTP_SHUTDOWN_TIMEOUT is the only internal stop deadline today; setting
+	// FX_STOP_TIMEOUT equal to it (rather than strictly greater) must fail,
+	// since the Fx-wide deadline would expire at the same instant the HTTP
+	// drain is still allowed to run.
+	t.Setenv("HTTP_SHUTDOWN_TIMEOUT", "20s")
+	t.Setenv("FX_STOP_TIMEOUT", "20s")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("want error when FX_STOP_TIMEOUT does not exceed internal stop deadlines, got nil")
+	}
+}
+
+func TestLoad_InvalidLogLevel(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+	t.Setenv("LOG_LEVEL", "verbose")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("want error for invalid LOG_LEVEL, got nil")
+	}
+}
+
+func validEnv(t *testing.T) map[string]string {
+	t.Helper()
+	return map[string]string{
+		"DATABASE_URL":                    "postgres://user:pass@localhost:5432/wallet",
+		"SQS_ENDPOINT_URL":                "http://localhost:4566",
+		"SQS_CONSUMER_ACCESS_KEY_ID":      "AKIACONSUMER",
+		"SQS_CONSUMER_SECRET_ACCESS_KEY":  "consumer-secret",
+		"SQS_PUBLISHER_ACCESS_KEY_ID":     "AKIAPUBLISHER",
+		"SQS_PUBLISHER_SECRET_ACCESS_KEY": "publisher-secret",
+	}
+}
