@@ -12,8 +12,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-wallet}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wallet}
       POSTGRES_DB: ${POSTGRES_DB:-wallet}
+    # Bound to loopback only: wallet_app has no password until
+    # postgres-provisioning sets one below, and the owner's own password is
+    # a throwaway local value (.env.example) never meant to be reachable
+    # from outside this machine.
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wallet} -d ${POSTGRES_DB:-wallet}"]
       interval: 2s
@@ -60,6 +64,32 @@ services:
     depends_on:
       - ministack
 
+  # One-shot: creates the wallet_app role (LOGIN, no password yet) if it
+  # does not already exist, then sets its password. Runs as the postgres
+  # image (already has psql) against the owner's own DATABASE_URL, before
+  # migrate - the role is a cluster object, so it has to exist before
+  # migrations/0002_app_role.up.sql can grant it anything. Idempotent, the
+  # same way deploy/ministack/provision.sh is: a random password is
+  # generated only the first time and then reused - reapplying the same
+  # ALTER ROLE on every subsequent `docker compose up` - so a second
+  # `up --build` never rotates it, and neither does a `migrate down`
+  # followed by `migrate up`, since neither migration direction touches the
+  # role. Never mounted into any other container; only test/integration
+  # reads the file it writes, straight from the host.
+  postgres-provisioning:
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "/provision.sh"]
+    environment:
+      OWNER_DATABASE_URL: postgres://${POSTGRES_USER:-wallet}:${POSTGRES_PASSWORD:-wallet}@postgres:5432/${POSTGRES_DB:-wallet}?sslmode=disable
+      POSTGRES_RUNTIME_DIR: /shared
+      POSTGRES_CREDENTIALS_FILE: /shared/credentials.env
+    volumes:
+      - ./deploy/postgres/provision.sh:/provision.sh:ro
+      - ./deploy/postgres/.runtime:/shared
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   migrate:
     <<: *app-image
     command: ["migrate", "up"]
@@ -68,6 +98,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-provisioning:
+        condition: service_completed_successfully
 
   app:
     <<: *app-image

@@ -16,17 +16,21 @@ e o subcomando de migrations.
 docker compose up --build
 ```
 
-Isso sobe, nesta ordem: `postgres` (com healthcheck), `ministack` (com
-`AUTH=true`), `provisioning` (one-shot: cria as filas, o redrive para a DLQ,
-os quatro usuários IAM de menor privilégio e os fixtures de teste de IAM -
-ver "Fixtures de teste de IAM" abaixo), `migrate` (one-shot: aplica as
-migrations) e por fim `app`, que só inicia depois que Postgres está
-saudável e os dois one-shots terminaram com sucesso.
+Isso sobe, nesta ordem: `postgres` (com healthcheck, publicado só em
+`127.0.0.1`), `ministack` (com `AUTH=true`), `provisioning` (one-shot: cria
+as filas, o redrive para a DLQ, os quatro usuários IAM de menor privilégio e
+os fixtures de teste de IAM - ver "Fixtures de teste de IAM" abaixo),
+`postgres-provisioning` (one-shot: cria o papel `wallet_app`, se ainda não
+existir, e define sua senha - ver "Credenciais do Postgres" abaixo),
+`migrate` (one-shot: aplica as migrations - só depois que o papel já
+existe) e por fim `app`, que só inicia depois que Postgres está saudável e
+os one-shots de IAM/Postgres/migrations terminaram com sucesso.
 
-`provisioning` é idempotente: rodar `docker compose up --build` de novo
-contra o mesmo MiniStack reaproveita filas, usuários e chaves de acesso já
-existentes em vez de falhar. `docker compose stop && docker compose up
---build` funciona sem precisar derrubar o volume do MiniStack.
+`provisioning` e `postgres-provisioning` são idempotentes: rodar `docker
+compose up --build` de novo contra o mesmo MiniStack/Postgres reaproveita
+filas, usuários, chaves de acesso e a senha de `wallet_app` já existentes,
+em vez de falhar ou rotacionar credenciais. `docker compose stop && docker
+compose up --build` funciona sem precisar derrubar nenhum volume.
 
 Verificação:
 
@@ -67,6 +71,44 @@ privilégio que o container `app` usa (ver Dockerfile e
 `APP_RUNTIME_UID`/`APP_RUNTIME_GID` em `docker-compose.yml`), para que
 continue legível por ele apesar do modo `0600`.
 
+### Credenciais do Postgres
+
+O papel `wallet_app` e sua senha são objetos do cluster Postgres - existem
+fora de qualquer banco específico e sobrevivem a um `migrate down`/`up` - e
+por isso pertencem inteiramente ao provisionamento, nunca às migrations. O
+serviço one-shot `postgres-provisioning` (`deploy/postgres/provision.sh`)
+roda antes de `migrate`, contra o papel dono (`OWNER_DATABASE_URL`), e:
+
+- cria o papel `wallet_app` com `LOGIN`, se ele ainda não existir (sem
+  senha nesse momento);
+- gera 32 bytes aleatórios de `/dev/urandom`, em base64 URL-safe, só na
+  primeira vez;
+- roda `ALTER ROLE wallet_app WITH PASSWORD '...'`;
+- escreve `WALLET_APP_PASSWORD` em `deploy/postgres/.runtime/credentials.env`
+  (diretório `0700`, arquivo `0600`, criados com `umask`, git-ignorado e
+  fora da imagem via `.dockerignore` - mesmo padrão de
+  `deploy/ministack/.runtime`).
+
+Nenhum SQL versionado, em migration ou em qualquer outro lugar, contém uma
+senha funcional ou cria o papel. `migrations/0002_app_role.up.sql` só
+concede `USAGE` no schema `public` a `wallet_app`, e assume que o papel já
+existe - se não existir, a migration falha com uma mensagem clara ("papel
+wallet_app ausente: rode o provisionamento do Postgres antes das
+migrations") em vez de criar o papel silenciosamente. O `down` correspondente
+só revoga esse mesmo `USAGE`, nunca apaga o papel. Como resultado, um ciclo
+`migrate down` seguido de `migrate up` pelo subcomando público nunca afeta o
+papel `wallet_app` nem sua senha - só o provisionamento cria ou altera
+esse objeto.
+
+Idempotente como `provisioning`: se o arquivo de credenciais já existe, a
+senha é lida dele e reaplicada com o mesmo `ALTER ROLE`, em vez de gerar
+uma nova - por isso `docker compose stop && docker compose up --build`
+mantém a mesma senha. `test/integration` lê esse arquivo para conectar como
+`wallet_app` (ver `walletAppPassword` em `test/integration/helpers_test.go`);
+nenhum container de aplicação o monta - o processo `serve` continua usando
+`DATABASE_URL` (o papel dono) até o ticket que introduz os repositórios
+pgx, que é quem troca isso para `wallet_app` de verdade.
+
 ### Fixtures de teste de IAM
 
 `test/integration/iam_test.go` prova dois comportamentos de IAM que
@@ -100,7 +142,10 @@ go run ./cmd/wallet-service migrate down
 ```
 
 usa `DATABASE_URL` do ambiente. No Compose, o serviço `migrate` já roda
-`up` automaticamente antes da aplicação.
+`up` automaticamente antes da aplicação, depois que `postgres-provisioning`
+já criou o papel `wallet_app` (ver "Credenciais do Postgres" acima). Um
+`migrate down` seguido de `migrate up` nunca apaga nem recria esse papel ou
+sua senha.
 
 ## Testes
 
@@ -113,7 +158,7 @@ go test -race ./...
 Testes de integração (tag `integration`) precisam da infraestrutura no ar:
 
 ```sh
-docker compose up -d postgres ministack provisioning migrate
+docker compose up -d postgres ministack provisioning postgres-provisioning migrate
 
 export DATABASE_URL="postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable"
 export SQS_ENDPOINT_URL="http://localhost:4566"
@@ -122,11 +167,12 @@ export $(grep -v '^#' deploy/ministack/.runtime/app-credentials.env | xargs)
 go test -race -tags integration ./...
 ```
 
-`test/integration` lê `deploy/ministack/.runtime/test-credentials.env`
-diretamente (path default, ou `TEST_CREDENTIALS_FILE` para apontar para
-outro lugar) - não precisa exportar essas variáveis, só o arquivo precisa
-existir, o que o passo `docker compose up ... provisioning` acima já
-garante.
+`test/integration` lê `deploy/ministack/.runtime/test-credentials.env` e
+`deploy/postgres/.runtime/credentials.env` diretamente (path default, ou
+`TEST_CREDENTIALS_FILE`/`POSTGRES_CREDENTIALS_FILE` para apontar para outro
+lugar) - não precisa exportar essas variáveis, só os arquivos precisam
+existir, o que os passos `docker compose up ... provisioning` e
+`... postgres-provisioning` acima já garantem.
 
 - `internal/app`: composição Fx completa via `fxtest` - start/stop
   liberando recursos, e start falhando com config inválida.
@@ -143,7 +189,7 @@ garante.
 ## Idempotência e segundo `docker compose up`
 
 `docker compose stop && docker compose up --build` reaproveita o que já
-existe no MiniStack (filas, usuários, chaves) em vez de falhar. A suíte de
-integração continua passando depois de uma segunda subida, com as mesmas
-credenciais ou com credenciais reaproveitadas - nunca rotacionadas sem
-necessidade.
+existe no MiniStack (filas, usuários, chaves) e no Postgres (a senha de
+`wallet_app`) em vez de falhar ou rotacionar. A suíte de integração continua
+passando depois de uma segunda subida, com as mesmas credenciais ou com
+credenciais reaproveitadas - nunca rotacionadas sem necessidade.
