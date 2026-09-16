@@ -1,10 +1,9 @@
 # jungle-gaming-wallet
 
 Carteira de apostas distribuída em Go. Ver `ARCHITECTURE.md` para as decisões
-de desenho, as interpretações adotadas e as limitações conhecidas, e
-`.scratch/wallet-challenge/spec.md` para o desenho completo, seção por seção.
-Este README ensina a subir tudo, chamar cada rota autenticada e rodar cada
-suíte de teste a partir de um clone limpo.
+de desenho, as interpretações adotadas e as limitações conhecidas. Este README
+ensina a subir tudo, chamar cada rota autenticada e rodar cada suíte de teste a
+partir de um clone limpo.
 
 ## Pré-requisitos
 

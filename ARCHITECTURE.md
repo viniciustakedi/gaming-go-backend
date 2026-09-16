@@ -1,10 +1,8 @@
 # Arquitetura
 
 Este documento explica as decisões, as interpretações e as limitações da carteira de
-apostas. A fonte formal das decisões é `.scratch/wallet-challenge/spec.md`; este arquivo
-existe para o candidato defender cada uma delas linha a linha numa call de review, com
-referências diretas ao código. O `README.md` cobre como rodar e chamar o serviço; este
-documento cobre por que ele é assim.
+apostas, cada uma com referência direta ao código que a implementa. O `README.md` cobre
+como rodar e chamar o serviço; este documento cobre por que ele é assim.
 
 ## Dinheiro e o limite de `Money`
 

@@ -109,8 +109,7 @@ func unixPtr(t time.Time) *int64 {
 }
 
 // signToken hand-builds and RS256-signs a JWT carrying claims - the same
-// shape a real Keycloak access token has (see .scratch/wallet-challenge's
-// alignment.md verification notes and deploy/keycloak/realm-wallet.json).
+// shape a real Keycloak access token has (see deploy/keycloak/realm-wallet.json).
 func (p *fakeOIDCProvider) signToken(t *testing.T, claims tokenClaims) string {
 	t.Helper()
 	header := map[string]string{"alg": "RS256", "typ": "JWT", "kid": p.kid}
