@@ -417,11 +417,51 @@ func TestSQSConsumer_StopWithinDeadline_CommitsAndDeletesInFlightMessage(t *test
 	}
 }
 
+// TestSQSConsumer_StopDeadlineExpires_ReleasesAndReprocessesExactlyOnce
+// blocks a message's processing on an externally held wallet lock and
+// proves Stop times out and releases it instead of hanging or silently
+// succeeding. This requires every duration below to be strictly larger than
+// SQS_CONSUMER_SHUTDOWN_TIMEOUT, or something other than the shutdown
+// deadline would free the blocked query first, and the "err == nil" branch
+// would win the race even though the wallet lock is still held:
+//   - SQS_CONSUMER_SHUTDOWN_TIMEOUT itself must exceed
+//     SQS_CONSUMER_POLL_WAIT (1s) plus the fixed 5s post-cancel drain
+//     (internal/config's own validation), so 7s is the smallest valid
+//     value here.
+//   - SQS_CONSUMER_PROCESSING_TIMEOUT wraps every message's own context
+//     independently of Stop; left at a value shorter than or close to the
+//     shutdown timeout, it would cancel the blocked query on its own
+//     before the shutdown deadline ever fires. 10s clears 7s with margin.
+//   - SQS_CONSUMER_VISIBILITY_TIMEOUT must exceed ProcessingTimeout
+//     (config validation again), so 15s.
+//   - DATABASE_LOCK_TIMEOUT and DATABASE_STATEMENT_TIMEOUT
+//     (internal/pg's session-level GUCs, 3s/5s by default) bound the
+//     blocked FOR UPDATE independently of all of the above: Postgres
+//     itself would cancel the wait with "lock timeout" or "statement
+//     timeout" well before the 7s shutdown deadline, which is
+//     indistinguishable from a real infrastructure hiccup to the consumer
+//     (SQLSTATE 55P03/57014 are retried, not treated as Stop's own
+//     cancellation) and again lets Stop return nil while the wallet lock
+//     is still held elsewhere. 10s each clears the 7s shutdown timeout
+//     with the same margin as above.
+//
+// The stop context handed to h.stop must not compete with
+// SQS_CONSUMER_SHUTDOWN_TIMEOUT for the same budget either: Fx runs every
+// OnStop hook against that one context, so a tight ceiling shared with the
+// hooks that run before the consumer's own (HTTP, reference worker) can
+// expire before the consumer's configured timeout is reached, again racing
+// the wrong branch. Deriving it from the same figures config.Load validates
+// (SQS.Consumer.ShutdownTimeout plus the fixed post-cancel drain) with a
+// buffer keeps it a pure ceiling that is never the actual bottleneck; only
+// SQS_CONSUMER_SHUTDOWN_TIMEOUT governs how long this test actually takes.
 func TestSQSConsumer_StopDeadlineExpires_ReleasesAndReprocessesExactlyOnce(t *testing.T) {
 	t.Setenv("SQS_CONSUMER_ENABLED", "true")
 	t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")
-	t.Setenv("SQS_CONSUMER_VISIBILITY_TIMEOUT", "5s")
-	t.Setenv("SQS_CONSUMER_PROCESSING_TIMEOUT", "2s")
+	t.Setenv("SQS_CONSUMER_SHUTDOWN_TIMEOUT", "7s")
+	t.Setenv("SQS_CONSUMER_PROCESSING_TIMEOUT", "10s")
+	t.Setenv("SQS_CONSUMER_VISIBILITY_TIMEOUT", "15s")
+	t.Setenv("DATABASE_LOCK_TIMEOUT", "10s")
+	t.Setenv("DATABASE_STATEMENT_TIMEOUT", "10s")
 	h := newAppHarness(t)
 	ctx := context.Background()
 	wallet := openWalletHTTP(t, h, "100.00")
@@ -435,7 +475,8 @@ func TestSQSConsumer_StopDeadlineExpires_ReleasesAndReprocessesExactlyOnce(t *te
 	sendWagerMessage(t, sqsClient(t, rc.gatewayKey, rc.gatewaySecret), wallet.ID, "stop-expires-"+messageID, sqsWagerEnvelope(t, messageID, input, "idem-"+uniqueID("key")))
 	waitForWalletLockWait(t, lock.transactionID)
 
-	stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+	stopBudget := h.cfg.SQS.Consumer.ShutdownTimeout + config.SQSConsumerPostCancelDrain + 3*time.Second
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), stopBudget)
 	err := h.stop(t, stopCtx)
 	cancelStop()
 	if err == nil {

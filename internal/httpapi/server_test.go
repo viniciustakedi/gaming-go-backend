@@ -90,12 +90,34 @@ func TestRegisterLifecycle_EarlierHookFailureLeavesPortFree(t *testing.T) {
 // success path also releases the port on stop, so a start/stop/start cycle
 // on the very same address works - the scenario a process restart after a
 // clean shutdown relies on.
+//
+// It never picks a port by binding a throwaway listener and closing it
+// (that leaves a window, between the close and the real bind, for anything
+// else on the machine to grab the same port): attempt 1 binds
+// "127.0.0.1:0" itself, so the OS hands out a port that is free at the
+// exact instant it's claimed, and only the address this run's own Listener
+// actually got back (server.Addr()) is reused for attempt 2.
+//
+// It also does not call Stop right after Start. OnStart hands the listener
+// to (*http.Server).Serve on a goroutine and returns immediately - Serve
+// only registers that listener with the server, so Shutdown knows to close
+// it, once the goroutine actually runs, which OnStart never waits for. Stop
+// immediately after Start races that registration: net/http's Shutdown
+// finds no registered listener yet, returns success without closing
+// anything, and the port stays bound until the goroutine's own deferred
+// close eventually runs - which can lose to the next attempt's Listen.
+// A real round trip against the freshly started server is a genuine
+// synchronization point that closes that race without touching production
+// code: Serve registers its listener before it can Accept a connection, so
+// a successful response proves the registration already happened, and every
+// real caller of this server only ever stops it after it has been serving
+// traffic - never microseconds after Start with no request in between.
 func TestRegisterLifecycle_StopReleasesPortForRetry(t *testing.T) {
-	addr := freeAddr(t)
-	cfg := testHTTPConfig(addr)
 	logger := discardLogger()
+	addr := "127.0.0.1:0"
 
 	for attempt := 1; attempt <= 2; attempt++ {
+		cfg := testHTTPConfig(addr)
 		server, err := New(cfg, prometheus.NewRegistry(), ReadinessChecks{}, logger, nil, nil, nil, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("attempt %d: New: %v", attempt, err)
@@ -107,6 +129,14 @@ func TestRegisterLifecycle_StopReleasesPortForRetry(t *testing.T) {
 		if err := lc.Start(context.Background()); err != nil {
 			t.Fatalf("attempt %d: Start: %v", attempt, err)
 		}
+		addr = server.Addr()
+
+		resp, err := http.Get("http://" + addr + "/health/live")
+		if err != nil {
+			t.Fatalf("attempt %d: health check: %v", attempt, err)
+		}
+		_ = resp.Body.Close()
+
 		if err := lc.Stop(context.Background()); err != nil {
 			t.Fatalf("attempt %d: Stop: %v", attempt, err)
 		}

@@ -1,9 +1,10 @@
 # jungle-gaming-wallet
 
-Carteira de apostas distribuída em Go. Ver `.scratch/wallet-challenge/spec.md`
-para o desenho completo; este README cobre só o que este ticket (esqueleto
-executável) entrega: composição Fx, health checks, filas e IAM no MiniStack,
-e o subcomando de migrations.
+Carteira de apostas distribuída em Go. Ver `ARCHITECTURE.md` para as decisões
+de desenho, as interpretações adotadas e as limitações conhecidas, e
+`.scratch/wallet-challenge/spec.md` para o desenho completo, seção por seção.
+Este README ensina a subir tudo, chamar cada rota autenticada e rodar cada
+suíte de teste a partir de um clone limpo.
 
 ## Pré-requisitos
 
@@ -93,10 +94,33 @@ evento de rejeição auditável.
 
 ## Variáveis de ambiente
 
-Ver `.env.example`. `docker compose` lê um `.env` na raiz automaticamente;
-copie o exemplo se quiser mudar portas ou nomes de fila locais. As chaves de
-acesso do SQS não vão no `.env` - são geradas pelo `provisioning` a cada
-`docker compose up` e escritas em dois arquivos sob
+Ver `.env.example` - cobre tanto o que `docker compose` lê para montar o
+Compose (portas, nomes de fila, credenciais locais do Postgres) quanto os
+valores por trás de cada default do próprio binário Go
+(`internal/config.Load`), para quem for rodar `go run
+./cmd/wallet-service serve` fora do Compose. `docker compose` lê um `.env`
+na raiz automaticamente; copie o exemplo se quiser mudar portas ou nomes de
+fila locais - por exemplo, se `5432`, `4566`, `8080`, `8081`, `8091`-`8093`
+já estiverem em uso por outro processo na máquina, mude só
+`POSTGRES_PORT`/`MINISTACK_PORT`/`HTTP_PORT*`/`KEYCLOAK_PORT` no `.env` e
+rode `docker compose up --build` normalmente - todas as chamadas deste
+README continuam funcionando trocando `8080`/`8081` pelas portas escolhidas.
+A única pegadinha é para quem for rodar `go test -tags integration` ou
+`-tags multiinstance` **do host** contra portas remapeadas: esses testes
+resolvem a maioria dos endereços a partir dos arquivos de credenciais e de
+`KEYCLOAK_PORT` (com o padrão `8081` embutido quando a variável não está no
+ambiente do processo `go test`, não só no `.env`), mas `DATABASE_URL` e
+`SQS_ENDPOINT_URL` são lidos diretamente do ambiente do host sem consultar o
+`.env` - exporte os três antes de rodar `go test`, por exemplo:
+
+```sh
+export DATABASE_URL="postgres://wallet:wallet@localhost:${POSTGRES_PORT:-5432}/wallet?sslmode=disable"
+export SQS_ENDPOINT_URL="http://localhost:${MINISTACK_PORT:-4566}"
+export KEYCLOAK_PORT="${KEYCLOAK_PORT:-8081}"
+```
+
+As chaves de acesso do SQS não vão no `.env` - são geradas pelo
+`provisioning` a cada `docker compose up` e escritas em dois arquivos sob
 `deploy/ministack/.runtime/` (git-ignored), separados por menor privilégio:
 
 - `app-credentials.env` - só `SQS_CONSUMER_*` e `SQS_PUBLISHER_*`, as duas
@@ -179,10 +203,105 @@ nunca mostra a senha do dono, porque ela nunca chega a esse container.
   nada.
 - `GET /wallets/{walletId}` - `200` com `id`, `playerId`, `balance` e
   `version`, ou `404` se a carteira não existe.
+- `GET /wallets/{walletId}/ledger?cursor=&limit=` - pagina os lançamentos do
+  ledger em ordem estável (pela sequência interna, nunca por timestamp).
+  `limit` padrão 50, máximo 200. `200` com `entries` e `nextCursor` (nulo no
+  fim); cursor inválido devolve `400`.
+- `POST /wallets/{walletId}/reconciliation` - reconstrói o saldo a partir do
+  ledger, numa transação `REPEATABLE READ READ ONLY` (nunca altera o saldo
+  armazenado). `200` com `storedBalance`, `calculatedBalance`, `difference`,
+  `consistent` e `checkedEntries`; uma divergência ainda devolve `200`, mas
+  gera log `warn` e incrementa uma métrica - ver `ARCHITECTURE.md`.
 
-Toda chamada exige `Authorization: Bearer <token>` com o papel
-`wallet-admin`; ver "Autenticação e autorização" abaixo. `/health/*` e
-`/metrics` continuam públicos.
+`/wallets*` acima exige o papel `wallet-admin`. As rotas de apostas abaixo
+exigem o papel `provider` (com `providerId` do corpo/rota batendo com o
+`provider_id` do token) ou `wallet-admin` (vê qualquer provedor); ver
+"Autenticação e autorização" abaixo.
+
+- `POST /wagering/transactions` - processa `BET`, `WIN`, `LOSS`, `REFUND` ou
+  `ROLLBACK`. Corpo: `{"providerId", "externalTransactionId", "playerId",
+  "walletId", "roundId", "gameId", "kind", "money": {"amount", "currency"},
+  "referenceExternalTransactionId"?}`, com o header
+  `Idempotency-Key: <chave>`. `200` (`PROCESSED`) com `transactionId`,
+  `status`, `balance` e `idempotentReplay`; `202` (`PENDING_REFERENCE`,
+  sem `balance`) quando a referência ainda não chegou; `422` com
+  `failureCode` para uma rejeição de negócio persistida (mesmo corpo, mas
+  sem `error`) ou para entrada corrigível que não seja `INVALID_REQUEST`/
+  `INVALID_MONEY` (aí sim com `error`); `400` para essas duas, `404` para
+  `WALLET_NOT_FOUND`/`TRANSACTION_NOT_FOUND`, `409` para
+  `IDEMPOTENCY_KEY_REUSED`/`EXTERNAL_TRANSACTION_ID_CONFLICT`, `503` com
+  `Retry-After` numa indisponibilidade transitória - ver `ARCHITECTURE.md`,
+  "Catálogo de códigos HTTP e `failureCode`" para a tabela completa e por
+  que ela difere da de `/wallets*`.
+- `GET /wagering/transactions/{transactionId}` - registro completo (ids,
+  tipo, `money`, referências, `status`, `failureCode`, saldo resultante,
+  tentativas, próximo envio e timestamps). `provider` só vê as próprias
+  transações; qualquer outra coisa (provedor errado, id inexistente, linha
+  de origem interna) devolve o mesmo `404 TRANSACTION_NOT_FOUND`, para nunca
+  revelar que a linha existe.
+- `GET /providers/{providerId}/wagering/transactions/{externalTransactionId}` -
+  o mesmo registro, indexado pelo id externo do provedor. `providerId` da
+  rota diferente do token devolve `403` (aqui a rota já denuncia o
+  provedor, então não faz sentido escondê-lo atrás de um `404`).
+
+`/health/*` e `/metrics` continuam públicos.
+
+### Exemplos de chamadas autenticadas
+
+Com o stack no ar (`docker compose up --build`) e um shell no host:
+
+```sh
+# wallet-admin: abre a carteira e lê o saldo
+ADMIN_TOKEN=$(curl -s -X POST "http://localhost:${KEYCLOAK_PORT:-8081}/realms/wallet/protocol/openid-connect/token" \
+  -d grant_type=client_credentials -d client_id=wallet-service -d client_secret=wallet-service-secret \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+PLAYER_ID=$(python3 -c 'import uuid;print(uuid.uuid4())')
+WALLET=$(curl -s -X POST "http://localhost:${HTTP_PORT:-8080}/wallets" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"playerId\":\"$PLAYER_ID\",\"initialBalance\":{\"amount\":\"100.00\",\"currency\":\"BRL\"}}")
+echo "$WALLET"
+WALLET_ID=$(echo "$WALLET" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+
+curl -s "http://localhost:${HTTP_PORT:-8080}/wallets/$WALLET_ID/ledger" -H "Authorization: Bearer $ADMIN_TOKEN"
+curl -s -X POST "http://localhost:${HTTP_PORT:-8080}/wallets/$WALLET_ID/reconciliation" -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# provider: aposta contra a carteira acima
+PROVIDER_TOKEN=$(curl -s -X POST "http://localhost:${KEYCLOAK_PORT:-8081}/realms/wallet/protocol/openid-connect/token" \
+  -d grant_type=client_credentials -d client_id=provider-a -d client_secret=provider-a-secret \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+EXTERNAL_ID=$(python3 -c 'import uuid;print(uuid.uuid4())')
+BET=$(curl -s -X POST "http://localhost:${HTTP_PORT:-8080}/wagering/transactions" \
+  -H "Authorization: Bearer $PROVIDER_TOKEN" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: bet-$EXTERNAL_ID" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$EXTERNAL_ID\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"r1\",\"gameId\":\"g1\",\"kind\":\"BET\",\"money\":{\"amount\":\"20.00\",\"currency\":\"BRL\"}}")
+echo "$BET"
+TRANSACTION_ID=$(echo "$BET" | python3 -c 'import sys,json;print(json.load(sys.stdin)["transactionId"])')
+
+curl -s "http://localhost:${HTTP_PORT:-8080}/wagering/transactions/$TRANSACTION_ID" -H "Authorization: Bearer $PROVIDER_TOKEN"
+curl -s "http://localhost:${HTTP_PORT:-8080}/providers/provider-a/wagering/transactions/$EXTERNAL_ID" -H "Authorization: Bearer $PROVIDER_TOKEN"
+```
+
+Saída real de uma execução (`docker compose up --build` a partir de um clone
+limpo, seguida exatamente destes comandos):
+
+```
+$ curl -s -X POST http://localhost:8080/wallets ...
+{"id":"01a0a783-8355-76d0-b7cc-32d575c3f53b","playerId":"543d083e-4bae-4347-997b-663778197668","balance":{"amount":"100.00","currency":"BRL"},"version":1}
+
+$ curl -s http://localhost:8080/wallets/$WALLET_ID/ledger ...
+{"entries":[{"sequenceNumber":1,"transactionId":"01a0a783-8355-76d4-bb9d-c7809a2a0d1f","direction":"CREDIT","money":{"amount":"100.00","currency":"BRL"},"balanceBefore":{"amount":"0.00","currency":"BRL"},"balanceAfter":{"amount":"100.00","currency":"BRL"},"occurredAt":"2026-09-16T00:00:09.045446Z"}],"nextCursor":null}
+
+$ curl -s -X POST http://localhost:8080/wallets/$WALLET_ID/reconciliation ...
+{"walletId":"01a0a783-8355-76d0-b7cc-32d575c3f53b","storedBalance":{"amount":"100.00","currency":"BRL"},"calculatedBalance":{"amount":"100.00","currency":"BRL"},"difference":{"amount":"0.00","currency":"BRL"},"consistent":true,"checkedEntries":1}
+
+$ curl -s -X POST http://localhost:8080/wagering/transactions ... (BET 20.00)
+{"transactionId":"01a0a783-ba87-7602-9115-51d1532a466e","status":"PROCESSED","balance":{"amount":"80.00","currency":"BRL"},"idempotentReplay":false}
+
+$ curl -s http://localhost:8080/wagering/transactions/$TRANSACTION_ID ...
+{"transactionId":"01a0a783-ba87-7602-9115-51d1532a466e","externalTransactionId":"d0740891-94ac-411f-8824-075f19b4fa04","providerId":"provider-a","playerId":"543d083e-4bae-4347-997b-663778197668","walletId":"01a0a783-8355-76d0-b7cc-32d575c3f53b","roundId":"r1","gameId":"g1","kind":"BET","origin":"EXTERNAL","money":{"amount":"20.00","currency":"BRL"},"referenceExternalTransactionId":null,"referenceTransactionId":null,"status":"PROCESSED","failureCode":null,"resultingBalance":{"amount":"80.00","currency":"BRL"},"attempts":0,"nextAttemptAt":null,"pendingExpiresAt":null,"createdAt":"2026-09-16T00:00:23.174213Z","updatedAt":"2026-09-16T00:00:23.174213Z"}
+```
 
 ### Fixtures de teste de IAM
 
@@ -355,8 +474,58 @@ sua senha.
 ```sh
 gofmt -l .
 go vet ./...
+go test ./...
 go test -race ./...
 ```
+
+Esses quatro comandos são o seam 1 - domínio e unidades, sem nenhuma
+infraestrutura - e passam sempre, em qualquer ordem, mesmo sem Docker.
+
+### `staticcheck`
+
+```sh
+go install honnef.co/go/tools/cmd/staticcheck@latest
+staticcheck -tags "integration multiinstance faultinject" ./...
+```
+
+A primeira vez instala o binário em `$(go env GOPATH)/bin` (adicione ao
+`PATH` se ainda não estiver); as próximas só rodam a checagem. As três
+build tags juntas cobrem todo o código do repositório, incluindo os testes
+de integração, multi-instância e os pontos de injeção de falhas - sem elas,
+`staticcheck` nunca compila (e portanto nunca analisa) esses arquivos.
+Sem apontamentos é o estado esperado; qualquer um novo é para corrigir, não
+suprimir.
+
+### Infraestrutura compartilhada entre suítes: cuidados de quem for verificar tudo de uma vez
+
+`test/integration` e `test/multiinstance` apontam para o **mesmo** Postgres,
+MiniStack e Keycloak do Compose - não sobem uma cópia isolada por suíte.
+Isso é deliberado (é o que prova "várias instâncias reais, mesma
+infraestrutura"), mas tem duas consequências para quem for rodar as duas
+suítes em sequência, ou testar as chamadas manuais do "Fluxo para chamar a
+API" acima antes de rodar os testes:
+
+- **Pare o serviço `app` antes de rodar qualquer suíte com a tag
+  `integration` ou `multiinstance`.** Uma instância `app` viva do Compose
+  também tem seu próprio consumidor SQS, publisher de outbox e worker de
+  referências rodando contra a mesma infraestrutura - ela disputa mensagens
+  de `wager-transactions.fifo` e linhas `PENDING_REFERENCE` com o harness de
+  teste, produzindo falhas intermitentes de métrica/timeout que não são bugs
+  de produto. `docker compose stop app` resolve; `docker compose start app`
+  (ou outro `up --build`) devolve depois.
+- **Rode `test/multiinstance` antes de `test/integration`, ou reinicie o
+  Postgres entre as duas.** Alguns cenários de `test/integration` (expiração
+  de referência pendente, por exemplo) deixam propositalmente uma
+  `PENDING_REFERENCE` cuja referência nunca chega, criada sob configurações
+  curtas daquele teste - mas o worker de referências da suíte
+  multi-instância a reavalia sob configurações de *produção*
+  (`REFERENCE_WORKER_MAX_ATTEMPTS`/`RetryMax` bem maiores), o que pode levar
+  minutos para esgotar. O sintoma é `drainBacklog`'s espera pelo indicador
+  `pending_reference_active` chegando a zero estourando o prazo de 20s -
+  ver `ARCHITECTURE.md`, "Trabalho não concluído". `docker compose down -v
+  && docker compose up --build -d` entre as duas suítes (ou simplesmente
+  multi-instância primeiro) evita o problema por completo; nenhuma das duas
+  suítes precisa disso quando roda sozinha.
 
 Testes de integração (tag `integration`) precisam da infraestrutura no ar.
 `docker compose up -d` sozinho não espera os one-shots (`provisioning`,

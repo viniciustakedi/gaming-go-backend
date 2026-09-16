@@ -226,6 +226,33 @@ func TestLoad_RequiresPostCancellationDrainBudget(t *testing.T) {
 	}
 }
 
+// The composition root arms fx.StopTimeout from StopTimeoutFromEnv, while
+// Load validates the internal stop deadlines against its own value. A lower
+// ceiling there would cut a graceful shutdown short under a configuration
+// Load had accepted, so both must agree, with and without the variable set.
+func TestStopTimeoutFromEnv_MatchesLoad(t *testing.T) {
+	for k, v := range validEnv(t) {
+		t.Setenv(k, v)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if armed := StopTimeoutFromEnv(); armed != cfg.Fx.StopTimeout {
+		t.Errorf("default: StopTimeoutFromEnv() = %s, Load() = %s, want equal", armed, cfg.Fx.StopTimeout)
+	}
+
+	t.Setenv("FX_STOP_TIMEOUT", "70s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if armed := StopTimeoutFromEnv(); armed != cfg.Fx.StopTimeout {
+		t.Errorf("explicit: StopTimeoutFromEnv() = %s, Load() = %s, want equal", armed, cfg.Fx.StopTimeout)
+	}
+}
+
 func TestLoad_InvalidLogLevel(t *testing.T) {
 	for k, v := range validEnv(t) {
 		t.Setenv(k, v)

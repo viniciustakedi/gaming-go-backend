@@ -97,8 +97,7 @@ func (c *Consumer) stop(ctx context.Context) error {
 	case <-wait.Done():
 		workCancel()
 		// One post-cancellation window covers both releasing active messages and
-		// waiting for workers to finish. The active lock held by releaseActive
-		// keeps a worker from untracking before its visibility is reset.
+		// waiting for workers to finish.
 		drainCtx, cancelDrain := context.WithTimeout(context.Background(), c.drainTimeout())
 		defer cancelDrain()
 		// Hold active's lock while releasing: workers cannot untrack an entry
@@ -141,7 +140,7 @@ func (c *Consumer) run(receiveCtx, workCtx context.Context) {
 		// configured poll wait is a ceiling: reserve the post-cancel drain so a
 		// stop never needs to abandon an in-flight request to meet its deadline.
 		pollCtx, cancelPoll := context.WithTimeout(context.Background(), pollWait+time.Second)
-		output, err := c.queues.Consumer.ReceiveMessage(pollCtx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(c.queues.InputURL), MaxNumberOfMessages: 10, WaitTimeSeconds: int32(seconds(pollWait)), VisibilityTimeout: int32(seconds(c.cfg.VisibilityTimeout)), AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameAll}})
+		output, err := c.queues.Consumer.ReceiveMessage(pollCtx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(c.queues.InputURL), MaxNumberOfMessages: 10, WaitTimeSeconds: int32(seconds(pollWait)), VisibilityTimeout: int32(seconds(c.cfg.VisibilityTimeout)), MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameAll}})
 		cancelPoll()
 		if err != nil {
 			if receiveCtx.Err() != nil {
