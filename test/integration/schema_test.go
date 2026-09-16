@@ -285,9 +285,29 @@ func TestWagerTransactions_ResultingBalanceTerminalCheck(t *testing.T) {
 				requireErrorCode(t, err, sqlstateCheckViolation, tc.name)
 			} else {
 				requireNoError(t, err, tc.name)
+				settleIfPendingReference(t, ctx, conn, row)
 			}
 		})
 	}
+}
+
+// settleIfPendingReference retires a fixture row left in
+// PENDING_REFERENCE, the one non-terminal status a direct INSERT can
+// create. Such a row is shaped to exercise a CHECK constraint, not to be
+// processable: a BET, for one, never carries a reference, so the
+// pending-reference worker of any instance later running against this same
+// database claims it, cannot resolve it, classifies that as transient and
+// reschedules it forever. The multi-instance suite, which shares this
+// Postgres, then waits on a backlog gauge that can never reach zero.
+// Settling the row here leaves this test's own subject - the constraint -
+// untouched and leaves nothing durable behind.
+func settleIfPendingReference(t *testing.T, ctx context.Context, conn *pgx.Conn, row wagerTxRow) {
+	t.Helper()
+	if row.status != "PENDING_REFERENCE" {
+		return
+	}
+	_, err := conn.Exec(ctx, `UPDATE wager_transactions SET status = 'REJECTED', failure_code = 'REFERENCE_NOT_FOUND', resulting_balance = 0 WHERE id = $1`, row.id)
+	requireNoError(t, err, "settling a PENDING_REFERENCE fixture row")
 }
 
 // TestWagerTransactions_AmountByKindCheck covers

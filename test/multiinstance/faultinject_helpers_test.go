@@ -62,6 +62,7 @@ func startWithEnv(t *testing.T, binary, logDir, name string, overrides map[strin
 // package's full suite back to back.
 func drainBacklog(t *testing.T, binary, logDir string, sqsToo bool) *instance {
 	t.Helper()
+	expireForeignPendingReferences(t)
 	overrides := map[string]string{}
 	if sqsToo {
 		overrides["SQS_CONSUMER_ENABLED"] = "true"
@@ -75,6 +76,35 @@ func drainBacklog(t *testing.T, binary, logDir string, sqsToo bool) *instance {
 	}
 	stopInstance(t, drain)
 	return drain
+}
+
+// expireForeignPendingReferences brings every PENDING_REFERENCE row's
+// deadline and next attempt forward to now, so the drain instance's own
+// worker claims them right away (the claim in internal/referenceworkerpg
+// only takes rows whose next_attempt_at has come, and a row left mid-backoff
+// or mid-lease sits minutes in the future) and settles them through the
+// ordinary expiry path, letting pending_reference_active reach zero.
+//
+// Without it this package inherits an ordering dependency from the
+// integration suite, which shares this Postgres: those pending rows carry
+// the default 24h REFERENCE_WORKER_TTL stamped into pending_expires_at when
+// they were inserted, so no configuration on the drain instance can retire
+// them, and every scenario here fails on the drain barrier. Running the
+// suites in the other order, or against a fresh database, hides it - which
+// is exactly why the delivery has to survive `integration` first.
+//
+// It is an UPDATE the wallet_app role already holds (the worker reschedules
+// these same rows), never a delete, and it only reaches rows left behind
+// before the scenario starts: drainBacklog runs before the scenario creates
+// anything of its own.
+func expireForeignPendingReferences(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn := connectApp(t, ctx)
+	if _, err := conn.Exec(ctx, `UPDATE wager_transactions SET pending_expires_at = now(), next_attempt_at = now() WHERE status = 'PENDING_REFERENCE'`); err != nil {
+		t.Fatalf("expire leftover pending references: %v", err)
+	}
 }
 
 // bareMetricValue reads a single, unlabeled Prometheus metric (gauge or
