@@ -637,8 +637,15 @@ func TestMultiInstance_TwoPublishersDisputeSameOutboxConcurrently_BothInstancesP
 // so the restart cannot reset it) is what makes the pendency expire quickly
 // on either side of the restart, exactly the way the ticket's own attempt
 // -exhaustion alternative (as opposed to TTL) already works at seam 3a.
+//
+// The short REFERENCE_WORKER_LEASE is what keeps the restart itself
+// bounded: next_attempt_at is also the lease, so a worker killed while
+// holding a claim leaves that row untouchable until the lease expires - a
+// full 30s under the production default, longer than this scenario's own
+// deadline, and a race the fresh trio would win or lose depending on where
+// in a poll cycle the kill happened to land.
 func TestMultiInstance_PendingReferenceExpiresAfterAllInstancesRestart_RejectedWithReferenceNotFound(t *testing.T) {
-	overrides := map[string]string{"REFERENCE_WORKER_MAX_ATTEMPTS": "2"}
+	overrides := map[string]string{"REFERENCE_WORKER_MAX_ATTEMPTS": "2", "REFERENCE_WORKER_LEASE": "2s"}
 	instances := startTrioWithEnv(t, overrides)
 	ctx := context.Background()
 	admin := adminToken(t)

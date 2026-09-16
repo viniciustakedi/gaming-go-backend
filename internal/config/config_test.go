@@ -1,8 +1,36 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+// configEnvPrefixes covers every environment variable Load reads. The
+// README tells whoever runs the integration suite from the host to export
+// DATABASE_URL, SQS_ENDPOINT_URL and KEYCLOAK_PORT, so the shell running
+// `go test ./...` right afterwards can easily carry values that change what
+// Load returns. These tests assert defaults, so they clear that inherited
+// environment first and let each case put back only what it means to test.
+var configEnvPrefixes = []string{"DATABASE_", "POSTGRES_", "SQS_", "WAGER_", "AUTH_", "HTTP_", "FX_", "OUTBOX_", "REFERENCE_WORKER_", "LOG_", "METRICS_", "KEYCLOAK_", "MINISTACK_"}
+
+func isolateConfigEnv(t *testing.T) {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		name, value, _ := strings.Cut(entry, "=")
+		for _, prefix := range configEnvPrefixes {
+			if !strings.HasPrefix(name, prefix) {
+				continue
+			}
+			t.Cleanup(func() { os.Setenv(name, value) })
+			os.Unsetenv(name)
+			break
+		}
+	}
+}
 
 func TestLoad_MissingRequiredValues(t *testing.T) {
+	isolateConfigEnv(t)
 	t.Setenv("DATABASE_HOST", "")
 	t.Setenv("DATABASE_NAME", "")
 	t.Setenv("SQS_ENDPOINT_URL", "")
@@ -267,6 +295,7 @@ func TestLoad_InvalidLogLevel(t *testing.T) {
 
 func validEnv(t *testing.T) map[string]string {
 	t.Helper()
+	isolateConfigEnv(t)
 	return map[string]string{
 		"DATABASE_HOST":                   "localhost",
 		"DATABASE_NAME":                   "wallet",
