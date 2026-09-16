@@ -802,14 +802,27 @@ func TestWageringPendingReference_RejectedReferenceIsRejectedNotProcessed(t *tes
 	}
 }
 
+// TestReferenceWorker_StopCompletesFxComposition proves Stop abandons an
+// in-flight resume with a rollback: the pending reference must still be
+// PENDING_REFERENCE afterward, untouched, and become claimable again once
+// its own lease elapses, not after a retry backoff. Ordering used to be a
+// timer race - a worker polling on its own interval against this test's HTTP
+// round trips and lock acquisition - which stayed a race no matter how much
+// slack was added between the interval and the deadline. Instead, h1 starts
+// with its reference worker disabled (REFERENCE_WORKER_ENABLED=false), so
+// nothing claims anything while the REFUND is submitted and the wallet lock
+// is taken; only once both are done does h2 - a second instance of the whole
+// Fx app - start with the worker enabled. Worker.start claims immediately
+// (Worker.run calls ProcessBatch before its own poll interval's first tick),
+// so h2's very first claim attempt is ordered after the REFUND and the lock
+// by process start order alone, never by wall-clock chance.
 func TestReferenceWorker_StopCompletesFxComposition(t *testing.T) {
-	t.Setenv("REFERENCE_WORKER_POLL_INTERVAL", "100ms")
-	t.Setenv("REFERENCE_WORKER_LEASE", "150ms")
-	h := newAppHarness(t)
+	t.Setenv("REFERENCE_WORKER_ENABLED", "false")
+	h1 := newAppHarness(t)
 	ctx := context.Background()
-	wallet := openWalletHTTP(t, h, "100.00")
+	wallet := openWalletHTTP(t, h1, "100.00")
 	round, betExternalID := uniqueID("round"), uniqueID("bet")
-	response, body := doReversal(t, h, providerAToken(t), wallet, "REFUND", round, "30.00", betExternalID)
+	response, body := doReversal(t, h1, providerAToken(t), wallet, "REFUND", round, "30.00", betExternalID)
 	if response.StatusCode != http.StatusAccepted {
 		t.Fatalf("pending REFUND status = %d, want 202, body = %s", response.StatusCode, body)
 	}
@@ -818,10 +831,15 @@ func TestReferenceWorker_StopCompletesFxComposition(t *testing.T) {
 	lockTx, err := lock.Begin(ctx)
 	requireNoError(t, err, "begin controlled wallet lock")
 	requireNoError(t, lockTx.QueryRow(ctx, `SELECT id FROM wallets WHERE id = $1 FOR UPDATE`, wallet.ID).Scan(new(string)), "lock wallet while worker resumes")
+
+	t.Setenv("REFERENCE_WORKER_ENABLED", "true")
+	t.Setenv("REFERENCE_WORKER_LEASE", "150ms")
+	h2 := newAppHarness(t)
+
 	deadline := time.Now().Add(2 * time.Second)
 	claimed := false
 	for time.Now().Before(deadline) {
-		requireNoError(t, h.pool.QueryRow(ctx, `SELECT next_attempt_at > now() FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&claimed), "observe worker claim")
+		requireNoError(t, h2.pool.QueryRow(ctx, `SELECT next_attempt_at > now() FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&claimed), "observe worker claim")
 		if claimed {
 			break
 		}
@@ -832,7 +850,7 @@ func TestReferenceWorker_StopCompletesFxComposition(t *testing.T) {
 	}
 	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := h.stop(t, stopCtx); err != nil {
+	if err := h2.stop(t, stopCtx); err != nil {
 		t.Fatalf("Fx stop with reference worker polling = %v", err)
 	}
 	requireNoError(t, lockTx.Rollback(context.Background()), "release controlled wallet lock")

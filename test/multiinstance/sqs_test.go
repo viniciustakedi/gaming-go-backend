@@ -66,7 +66,6 @@ func newSQSClient(t *testing.T, accessKeyID, secretAccessKey string) *sqs.Client
 
 func sqsQueueURL(name string) string { return testclient.QueueURL(name) }
 
-func inputQueueName() string  { return testclient.InputQueueName() }
 func outputQueueName() string { return testclient.OutputQueueName() }
 
 // eventEnvelopeJSON is test/testclient's shared minimal outbox envelope

@@ -24,7 +24,7 @@ type fakeUnitOfWork struct {
 
 func (f fakeUnitOfWork) WithinTx(ctx context.Context, fn func(context.Context, walletapp.Repositories) error) error {
 	return fn(ctx, walletapp.Repositories{
-		Wallets:      fakeWalletRepository{insertErr: f.insertErr},
+		Wallets:      fakeWalletRepository(f),
 		Transactions: fakeNoopTransactionRepository{},
 		Ledger:       fakeNoopLedgerRepository{},
 		Outbox:       fakeNoopOutboxRepository{},

@@ -66,10 +66,6 @@ type roleCreds struct {
 	redriveMaxReceiveCount int
 }
 
-func testEndpoint() string { return testclient.SQSEndpoint() }
-
-func testRegion() string { return testclient.SQSRegion() }
-
 // loadTestCreds reads both credential files provision.sh writes: this test
 // suite needs to authenticate as every role, including consumer and
 // publisher, to prove what each one can and cannot do - that is different
@@ -138,8 +134,6 @@ func loadTestCreds(t *testing.T) roleCreds {
 func sqsClient(t *testing.T, accessKeyID, secretAccessKey string) *sqs.Client {
 	return testclient.NewSQSClient(t, accessKeyID, secretAccessKey)
 }
-
-func accountID() string { return testclient.SQSAccountID() }
 
 // queueURL builds the queue URL directly instead of calling GetQueueUrl:
 // not every role in the IAM model has that action on every queue this test

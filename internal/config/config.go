@@ -95,6 +95,12 @@ type SQSConsumerConfig struct {
 // budget because the release happens before dependent clients may close.
 const SQSConsumerPostCancelDrain = 5 * time.Second
 
+// defaultFxStopTimeout is shared by StopTimeoutFromEnv, which arms the Fx
+// deadline, and Load, which validates that the same budget covers every
+// internal stop deadline. Two literals would let validation pass against a
+// ceiling the application never applies.
+const defaultFxStopTimeout = 60 * time.Second
+
 // OutboxConfig bounds how much work one publisher claims and how long a
 // crashed publisher can hold that work before another instance resumes it.
 type OutboxConfig struct {
@@ -166,7 +172,7 @@ var rootAccessKeyID12Digits = regexp.MustCompile(`^\d{12}$`)
 // Load moments later, when the Fx graph is built.
 func StopTimeoutFromEnv() time.Duration {
 	var discarded []error
-	return getDuration("FX_STOP_TIMEOUT", 45*time.Second, &discarded)
+	return getDuration("FX_STOP_TIMEOUT", defaultFxStopTimeout, &discarded)
 }
 
 // Load reads the configuration from the process environment and validates
@@ -300,7 +306,7 @@ func Load() (Config, error) {
 	// here is generous rather than matched to SQS_STARTUP_TIMEOUT's 10s.
 	cfg.Auth.DiscoveryTimeout = getDuration("AUTH_DISCOVERY_TIMEOUT", 45*time.Second, &errs)
 
-	cfg.Fx.StopTimeout = getDuration("FX_STOP_TIMEOUT", 60*time.Second, &errs)
+	cfg.Fx.StopTimeout = getDuration("FX_STOP_TIMEOUT", defaultFxStopTimeout, &errs)
 
 	// internalStopDeadline sums every stop-side deadline the shutdown
 	// sequence already waits on before the pools close. fx.StopTimeout must exceed that sum, or the Fx-wide deadline can
