@@ -16,7 +16,7 @@ partir de um clone limpo.
 docker compose up --build
 ```
 
-Isso sobe, nesta ordem: `postgres` (com healthcheck, publicado só em
+Isso sobe (literalmente tudo), nesta ordem: `postgres` (com healthcheck, publicado só em
 `127.0.0.1`), `ministack` (com `AUTH=true`), `keycloak` (também publicado só
 em `127.0.0.1`, sem administrador - realm `wallet` importado automaticamente
 do arquivo `deploy/keycloak/realm-wallet.json` - ver "Autenticação e
@@ -768,7 +768,7 @@ existe no MiniStack (filas, usuários, chaves) e no Postgres (a senha de
 passando depois de uma segunda subida, com as mesmas credenciais ou com
 credenciais reaproveitadas - nunca rotacionadas sem necessidade.
 
-## Processo de engenharia: spec-driven development
+## Meu processo de engenharia: spec-driven development
 
 O desafio foi entregue em três dias (14 a 16 de setembro de 2026) com
 desenvolvimento assistido por IA sob coordenação humana, dentro de um fluxo
