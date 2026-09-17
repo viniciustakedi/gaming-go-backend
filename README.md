@@ -768,51 +768,114 @@ existe no MiniStack (filas, usuários, chaves) e no Postgres (a senha de
 passando depois de uma segunda subida, com as mesmas credenciais ou com
 credenciais reaproveitadas - nunca rotacionadas sem necessidade.
 
-## Como esta entrega foi construída
+## Processo de engenharia: spec-driven development
 
-O desafio foi implementado em três dias corridos (14 a 16 de setembro de
-2026), com desenvolvimento assistido por IA sob coordenação humana. Esta
-seção descreve o processo, as decisões que ele produziu e como cada uma foi
-verificada, para que tudo possa ser discutido numa call de review.
+O desafio foi entregue em três dias (14 a 16 de setembro de 2026) com
+desenvolvimento assistido por IA sob coordenação humana, dentro de um fluxo
+**SDD - spec-driven development**: a especificação é o artefato de origem, o
+código é derivado dela, e nada é implementado antes de existir uma decisão
+escrita sobre o que deve acontecer e como isso será provado. Esta seção
+descreve esse fluxo porque ele explica a forma do repositório: por que os
+tickets estão na ordem em que estão, por que certos testes existem e por que
+determinadas decisões foram tomadas do jeito que foram.
 
-**Especificação antes de código.** O enunciado virou primeiro uma
-especificação de desenho (dinheiro, máquina de estados, idempotência, locks,
-referências, inbox/outbox, autenticação, observabilidade e decisões de
-teste) e, a partir dela, 17 tickets em ordem de dependência, cada um com
-critérios de aceite verificáveis e as seções da spec que precisava atender.
-Nenhum ticket começou sem saber o que provaria ao terminar.
+### 1. Interrogar o enunciado antes de escrever qualquer linha
 
-**Duas frentes de implementação, em modelos diferentes.** Cada ticket foi
-implementado por um agente isolado, na sua própria worktree e branch:
-Claude Sonnet 5 nos tickets de esqueleto, banco, HTTP, autenticação,
-reversões, leituras, harness multi-instância, recuperação de falhas e
-documentação; Codex GPT-5.6 nos tickets de `Money`, domínio, regras e hash
-de idempotência, outbox, consumidor SQS, ledger e referências pendentes.
+Um enunciado de 466 linhas parece completo até você tentar implementá-lo. A
+primeira etapa foi um interrogatório dirigido do texto, buscando toda
+ambiguidade que viraria retrabalho depois: o que exatamente é `WIN` com
+referência; o que acontece quando uma reversão chega antes da operação
+referenciada; qual é o limite de `Money` e o que fazer no overflow; quais
+falhas são transitórias e quais são permanentes; quem pode ler o quê; o que
+significa "at-least-once" para cada canal de entrada.
 
-**Revisão sempre por outra família de modelo.** Nenhum agente revisou o
-próprio trabalho nem o de um colega do mesmo modelo. Os tickets fundacionais
-ou de maior risco passaram por um painel de quatro lentes independentes
-(aderência à spec, padrões do repositório, corretude e segurança); os demais,
-por uma passada combinada. Achados Critical e Major bloqueavam o merge:
-o ticket voltava para correção e depois para uma nova revisão, que
-precisava confirmar item a item. Ao todo foram 59 relatórios de revisão e
-127 achados.
+Cada ambiguidade virou uma **decisão explícita**, com a alternativa
+descartada e o motivo. Nove dessas decisões estruturam o sistema inteiro e
+estão registradas no `ARCHITECTURE.md`, junto das interpretações adotadas
+onde o enunciado deixava espaço.
 
-**O que a revisão pegou.** Entre outros: uma senha de banco versionada numa
-migration; um Keycloak com administrador exposto; a credencial do dono do
-banco no ambiente da aplicação; uma estrutura de operação preparada que
-podia ser forjada fora do caso de uso; um lease de outbox que usava o
-relógio do processo em vez do relógio do Postgres; um `stop()` que retornava
-antes dos workers terminarem; e cenários de injeção de falha que passariam
-mesmo sem a garantia que alegavam provar.
+### 2. Especificação como fonte única da verdade
 
-**Verificação final como um avaliador faria.** A entrega foi verificada a
-partir de um clone limpo, rodando os comandos deste README na ordem em que
+As decisões foram consolidadas numa especificação de desenho cobrindo
+dinheiro e precisão, máquina de estados, idempotência persistente, política
+de locks e ordem de aquisição, referências pendentes, matriz de reversões,
+inbox e outbox com o contrato de eventos, autenticação e autorização,
+observabilidade e - a parte que mais economiza tempo depois - as **decisões
+de teste**: quais são os seams públicos do sistema, o que cada seam prova e
+o que deliberadamente não é testado ali.
+
+Definir os seams antes de escrever testes evita o padrão mais comum de
+suíte inútil: testes acoplados a implementação, que quebram quando o código
+muda e passam quando o comportamento quebra. Aqui existem quatro seams -
+domínio puro, aplicação com dependências em memória, contrato externo com
+Postgres, Keycloak e SQS reais, e o harness de três instâncias com injeção
+de falhas.
+
+### 3. Tickets como fatias verticais, não como camadas
+
+A spec virou 17 tickets em ordem topológica de dependência, cada um com
+critérios de aceite verificáveis, as seções da spec que precisava atender e
+a lista explícita do que provaria ao terminar. Os tickets são fatias
+verticais: "BET, WIN e LOSS por HTTP com idempotência persistente" atravessa
+domínio, aplicação, persistência e transporte de uma vez, em vez de entregar
+uma camada inteira sem nada funcionando ponta a ponta.
+
+As arestas de bloqueio entre tickets formam um grafo, não uma fila: o
+esqueleto executável e o schema do banco destravam várias frentes em
+paralelo, enquanto o worker de referências pendentes só pode começar depois
+das reversões e do consumidor SQS.
+
+### 4. Execução isolada, um agente por ticket
+
+Cada ticket foi implementado por um agente em contexto próprio, na sua
+worktree e branch, com acesso ao ticket, à spec e ao repositório - nunca ao
+raciocínio de outro agente. Duas frentes, em famílias de modelo diferentes:
+Claude Sonnet 5 no esqueleto, banco, HTTP, autenticação, reversões,
+leituras, harness multi-instância, recuperação de falhas e documentação;
+Codex GPT-5.6 em `Money`, domínio, regras e hash de idempotência, outbox,
+consumidor SQS, ledger e referências pendentes.
+
+O isolamento é deliberado: contextos independentes não compartilham os
+mesmos pontos cegos, e a divergência entre eles aparece na revisão em vez de
+virar um erro consistente no sistema todo.
+
+### 5. Revisão adversarial, sempre por outro modelo
+
+Nenhum agente revisou o próprio trabalho, nem o de um colega da mesma
+família de modelo. Tickets fundacionais ou de maior risco passaram por um
+painel de quatro lentes independentes - aderência à spec, padrões do
+repositório, corretude e segurança - e os demais por uma passada combinada.
+Cada revisor classificava os achados em Critical, Major, Minor ou
+Suggestion, com arquivo, linha e o caminho concreto até a falha.
+
+Critical e Major **bloqueavam o merge**. O ticket voltava para correção e
+depois para uma nova revisão, que precisava confirmar item a item que o
+achado tinha sido resolvido, sem regressão e sem escopo novo. Foram 59
+relatórios e 127 achados ao longo da execução.
+
+Alguns exemplos do que esse gate pegou, todos corrigidos antes do merge:
+uma senha de banco versionada numa migration; um Keycloak com administrador
+exposto; a credencial do dono do banco no ambiente da aplicação; uma
+estrutura de operação preparada que podia ser forjada fora do caso de uso;
+um lease de outbox calculado com o relógio do processo em vez do relógio do
+Postgres; um `stop()` que retornava antes de os workers terminarem; e
+cenários de injeção de falha que passariam mesmo sem a garantia que
+alegavam provar.
+
+### 6. Verificação como um avaliador, não como o autor
+
+A última etapa não confia em nenhuma das anteriores. A entrega foi rodada a
+partir de um clone limpo, seguindo os comandos deste README na ordem em que
 eles aparecem: `gofmt`, `go vet` nas quatro combinações de build tags,
 `staticcheck`, `go test`, `go test -race`, `docker compose up --build`, a
 suíte de integração, a suíte multi-instância com os sete cenários de morte
 de processo e, por fim, os exemplos de chamada autenticada colados daqui.
-Essa passada encontrou três defeitos que nenhuma suíte via isoladamente -
-testes de configuração presos ao ambiente do shell, uma dependência de ordem
-entre as suítes e um cenário com prazo menor que o lease padrão - todos
-corrigidos antes da entrega.
+
+Essa passada encontrou três defeitos que nenhuma suíte via isoladamente:
+testes de configuração que liam o ambiente do shell e quebravam logo depois
+de rodar a suíte de integração como o próprio README ensina; uma dependência
+de ordem entre as suítes, causada por uma linha de fixture que o worker de
+referências nunca conseguiria resolver; e um cenário de recuperação cujo
+prazo era menor que o lease padrão que ele mesmo precisava esperar. Os três
+foram corrigidos antes da entrega - e nenhum deles teria aparecido rodando
+cada suíte isoladamente, que é como o autor normalmente roda.
