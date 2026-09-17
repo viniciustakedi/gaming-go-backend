@@ -10,9 +10,8 @@ import (
 )
 
 // tokenHTTPClient, keycloakClient, fetchToken and the client fixtures below
-// are test/testclient's shared Keycloak client (spec, seam 3: "o mesmo
-// cliente de teste roda em dois harnesses") - test/integration uses the same
-// package.
+// are test/testclient's shared Keycloak client - test/integration uses the
+// same package.
 var tokenHTTPClient = testclient.NewHTTPClient(10 * time.Second)
 
 type keycloakClient = testclient.KeycloakClient

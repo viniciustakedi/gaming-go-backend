@@ -98,11 +98,10 @@ func TestWageringTransactionByIDHandler_MalformedID_Returns400(t *testing.T) {
 	}
 }
 
-// TestWageringTransactionByIDHandler_NonCanonicalUUID_Returns400 proves the
-// spec's own requirement that the path id be a canonical UUID - lowercase
-// hex digits, hyphenated 8-4-4-4-12 - is enforced before the use case ever
-// runs (review finding: uuid.Parse alone accepts uppercase and other
-// non-canonical spellings).
+// TestWageringTransactionByIDHandler_NonCanonicalUUID_Returns400 checks the
+// path id is a canonical UUID - lowercase hex, hyphenated 8-4-4-4-12 - before
+// the use case ever runs. uuid.Parse alone is not enough: it also accepts
+// uppercase, unhyphenated and braced spellings.
 func TestWageringTransactionByIDHandler_NonCanonicalUUID_Returns400(t *testing.T) {
 	cases := []struct {
 		name string
@@ -211,9 +210,8 @@ func TestWageringTransactionByIDHandler_Admin_SeesOtherProviderRow(t *testing.T)
 	}
 }
 
-// specTransactionDetailKeys is every key the spec's "registro completo"
-// requires in the wire body, present or not, so a review finding like
-// omitempty silently dropping a key never slips back in undetected.
+// specTransactionDetailKeys is every key the wire body must carry, set or not,
+// so an omitempty silently dropping one never slips back in undetected.
 var specTransactionDetailKeys = []string{
 	"transactionId", "externalTransactionId", "providerId", "playerId", "walletId",
 	"roundId", "gameId", "kind", "origin", "money",
@@ -244,11 +242,10 @@ func assertNullKeys(t *testing.T, decoded map[string]any, keys ...string) {
 	}
 }
 
-// TestWageringTransactionByIDHandler_OpeningRow_NullFieldsPresent proves the
-// review finding is fixed: an INTERNAL OPENING row - which carries none of
-// externalTransactionId, providerId, roundId or gameId - still sends every
-// spec key, as explicit null rather than omitting them (review: "omitempty
-// elimina campos condicionais/nulos").
+// TestWageringTransactionByIDHandler_OpeningRow_NullFieldsPresent pins that an
+// INTERNAL OPENING row - carrying none of externalTransactionId, providerId,
+// roundId or gameId - still sends every key as an explicit null rather than
+// omitting it.
 func TestWageringTransactionByIDHandler_OpeningRow_NullFieldsPresent(t *testing.T) {
 	amount, err := money.New(5000, money.BRL)
 	if err != nil {
@@ -302,10 +299,9 @@ func TestWageringTransactionByIDHandler_NoReference_NullReferenceFields(t *testi
 	assertNullKeys(t, decoded, "referenceExternalTransactionId", "referenceTransactionId", "failureCode", "nextAttemptAt", "pendingExpiresAt")
 }
 
-// TestWageringTransactionByIDHandler_Timestamps_SerializedAsUTC proves the
-// re-review fix (Major #2): a TransactionDetail whose timestamps came back
-// from the repository in a non-UTC zone must still serialize as RFC 3339 in
-// UTC, terminated in "Z" - not with the local offset baked in.
+// TestWageringTransactionByIDHandler_Timestamps_SerializedAsUTC pins that
+// timestamps returned by the repository in a non-UTC zone still serialize as
+// RFC 3339 in UTC, terminated in "Z", never with a local offset baked in.
 func TestWageringTransactionByIDHandler_Timestamps_SerializedAsUTC(t *testing.T) {
 	amount, err := money.New(1000, money.BRL)
 	if err != nil {
@@ -342,12 +338,10 @@ func TestWageringTransactionByIDHandler_Timestamps_SerializedAsUTC(t *testing.T)
 }
 
 // TestWageringTransactionByIDHandler_PendingReferenceRow_SerializesAllFields
-// proves the re-review fix (Major #3): the one PENDING_REFERENCE shape the
-// ticket's own scenario produces - attempts, nextAttemptAt, pendingExpiresAt
-// and referenceExternalTransactionId all set, referenceTransactionId,
-// failureCode and resultingBalance still null - serializes with every key,
-// type and value checked by hand, so a regression on any one of them is
-// caught.
+// checks the PENDING_REFERENCE shape by hand - attempts, nextAttemptAt,
+// pendingExpiresAt and referenceExternalTransactionId set, with
+// referenceTransactionId, failureCode and resultingBalance still null - so a
+// regression on any single key, type or value is caught.
 func TestWageringTransactionByIDHandler_PendingReferenceRow_SerializesAllFields(t *testing.T) {
 	amount, err := money.New(2500, money.BRL)
 	if err != nil {
@@ -509,12 +503,10 @@ func TestProviderWageringTransactionHandler_Missing_Returns404(t *testing.T) {
 
 // TestWageringTransactionByIDHandler_RolePrecedenceMatrix wires the handler
 // behind requireAnyRole exactly as server.go does for
-// GET /wagering/transactions/:transactionId, and drives it with the four
-// tokens the review asked for (review finding: wallet-admin+provider without
-// provider_id was rejected outright, while the same pair with provider_id
-// became admin - an inconsistent precedence). wallet-admin now wins whenever
-// present, and provider_id is only required from a caller acting solely as
-// a provider.
+// GET /wagering/transactions/:transactionId, and drives all four token shapes.
+// wallet-admin wins whenever present, and provider_id is required only from a
+// caller acting solely as a provider - otherwise wallet-admin+provider would
+// resolve differently depending on whether provider_id happened to be set.
 func TestWageringTransactionByIDHandler_RolePrecedenceMatrix(t *testing.T) {
 	providerOrAdmin := []string{auth.RoleProvider, auth.RoleWalletAdmin}
 	handler := requireAnyRole(providerOrAdmin, wageringTransactionByIDHandler(newGetTransactionUseCase(sampleDetail(t, "provider-a"), nil), discardLogger()))

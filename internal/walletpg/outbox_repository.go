@@ -11,14 +11,13 @@ import (
 
 type outboxRepository struct{ q pg.Querier }
 
-// newOutboxRepository builds the pgx-backed OutboxRepository bound to q.
 func newOutboxRepository(q pg.Querier) walletapp.OutboxRepository {
 	return &outboxRepository{q: q}
 }
 
 // Insert writes one outbox_events row with next_attempt_at left at its
 // column default (now()), so a freshly committed event is immediately
-// eligible for the publisher's claim query (ticket 12).
+// eligible for the outbox publisher's claim query.
 func (r *outboxRepository) Insert(ctx context.Context, record walletapp.OutboxRecord) error {
 	payload, err := json.Marshal(record.Payload)
 	if err != nil {

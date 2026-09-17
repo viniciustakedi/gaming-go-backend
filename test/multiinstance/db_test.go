@@ -13,10 +13,8 @@ import (
 // connectApp opens a direct connection to Postgres as wallet_app, used only
 // to read back state for assertions - never to move money itself. The
 // financial result of every scenario in this package comes from the
-// instances under test over HTTP; this connection exists purely to check
-// it against an independent source of truth (spec, Testing Decisions: "Todo
-// cenário financeiro termina conferindo o saldo armazenado contra a soma de
-// créditos menos débitos do ledger").
+// instances under test over HTTP; this connection exists purely to check it
+// against an independent source of truth.
 func connectApp(t *testing.T, ctx context.Context) *pgx.Conn {
 	t.Helper()
 	conn, err := pgx.Connect(ctx, appDSN(t))
@@ -116,8 +114,7 @@ func waitForWalletBalance(t *testing.T, ctx context.Context, conn *pgx.Conn, wal
 
 // openingTransactionID reads the id of walletID's own OPENING transaction -
 // the aggregate id its WagerTransactionProcessed outbox event was recorded
-// under (spec: "WagerTransactionProcessed... cobre conclusões com sucesso,
-// incluindo... OPENING").
+// under.
 func openingTransactionID(t *testing.T, ctx context.Context, conn *pgx.Conn, walletID string) string {
 	t.Helper()
 	var id string
@@ -153,9 +150,9 @@ func outboxEventIDs(t *testing.T, ctx context.Context, conn *pgx.Conn, aggregate
 }
 
 // openingOutboxEventIDs returns the eventIds of both outbox records a
-// positive-balance wallet opening commits (spec, "Outbox e eventos"):
-// WagerTransactionProcessed, aggregated under the OPENING transaction, and
-// WalletBalanceChanged, aggregated under the wallet itself.
+// positive-balance wallet opening commits: WagerTransactionProcessed,
+// aggregated under the OPENING transaction, and WalletBalanceChanged,
+// aggregated under the wallet itself.
 func openingOutboxEventIDs(t *testing.T, ctx context.Context, conn *pgx.Conn, walletID string) map[string]bool {
 	t.Helper()
 	ids := map[string]bool{}
@@ -206,10 +203,9 @@ func pgNow(t *testing.T, ctx context.Context, conn *pgx.Conn) time.Time {
 
 // outboxPublishedAfter reports whether eventID's published_at is strictly
 // after since - the independent, DB-side proof that whichever instance
-// confirmed it did so only after since (a scenario passes the moment the
-// victim is known dead, per waitExit, as its own since), so no other
-// process could have been the one to complete it (review, correctness:
-// "as tentativas e a confirmação no registro da outbox depois da morte").
+// confirmed it did so only after since. A scenario passes the moment the
+// victim is known dead, per waitExit, as its own since, so no dead process
+// could have been the one to complete it.
 func outboxPublishedAfter(t *testing.T, ctx context.Context, conn *pgx.Conn, eventID string, since time.Time) bool {
 	t.Helper()
 	var publishedAt *time.Time
@@ -222,10 +218,9 @@ func outboxPublishedAfter(t *testing.T, ctx context.Context, conn *pgx.Conn, eve
 // outboxPublishedAt reads eventID's own published_at - set by MarkPublished's
 // `now()`, Postgres's own clock, never a test-host or instance wall clock -
 // failing the test if it has not been confirmed yet. The dispute scenario's
-// overlap proof (review, correctness: "com o relógio do Postgres") is built
-// entirely on timestamps read through this function, so two instances'
-// claimed spans are always comparable on the same clock even though they run
-// as separate processes.
+// overlap proof is built entirely on timestamps read through this function,
+// so two instances' claimed spans are always comparable on the same clock
+// even though they run as separate processes.
 func outboxPublishedAt(t *testing.T, ctx context.Context, conn *pgx.Conn, eventID string) time.Time {
 	t.Helper()
 	var publishedAt *time.Time

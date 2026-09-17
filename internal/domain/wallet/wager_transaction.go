@@ -57,9 +57,8 @@ type ExternalTransactionInput struct {
 	Kind                           WagerKind
 	Money                          money.Money
 	ReferenceExternalTransactionID string
-	// ReferenceTransactionID is the internal id the reference resolved to
-	// (spec: "a referência resolvida fica persistida"). Empty for BET, LOSS
-	// and a WIN with no reference, since none of them ever resolve one.
+	// ReferenceTransactionID is the internal id the reference resolved to.
+	// Empty for BET, LOSS and a WIN with no reference: none resolve one.
 	ReferenceTransactionID string
 	CreatedAt              time.Time
 }

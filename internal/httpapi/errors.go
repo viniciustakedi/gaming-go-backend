@@ -7,8 +7,7 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/operation"
 )
 
-// errorBody is the JSON envelope every rejected request gets (spec,
-// "Contratos HTTP": "error: { code, message, correctable, details }").
+// errorBody is the JSON envelope every rejected request gets.
 type errorBody struct {
 	Error errorDetail `json:"error"`
 }
@@ -23,7 +22,7 @@ type errorDetail struct {
 // errorDetailItem names the one request field a validation failure traces
 // back to, and why. Every errorDetail carries a Details slice - never
 // omitted, `[]` rather than `null` when a failure has no field-level detail
-// to report (spec: "error: { code, message, correctable, details }").
+// to report.
 type errorDetailItem struct {
 	Field  string `json:"field"`
 	Reason string `json:"reason"`
@@ -31,12 +30,9 @@ type errorDetailItem struct {
 
 // writeErrorEnvelope is the one path every rejected request's JSON body
 // goes through - operation errors (below) and auth rejections
-// (auth_middleware.go's writeAuthError) alike - so the envelope's shape
-// (errorBody) is serialized in exactly one place (ticket 07 review:
-// "writeAuthError reescreve a serialização que writeOperationError já
-// faz"). It also sets Retry-After for a transient failure so the caller
-// knows it is safe, and worth it, to retry (spec: "Falha transitória do
-// banco devolve 503 com Retry-After").
+// (auth_middleware.go's writeAuthError) alike - so the envelope's shape is
+// serialized in exactly one place. It also sets Retry-After for a transient
+// failure, so the caller knows it is safe, and worth it, to retry.
 func writeErrorEnvelope(w http.ResponseWriter, status int, body errorBody) {
 	w.Header().Set("Content-Type", "application/json")
 	if status == http.StatusServiceUnavailable {
@@ -62,11 +58,10 @@ func writeOperationError(w http.ResponseWriter, err *operation.Error, details []
 	}})
 }
 
-// statusForOperationError picks the status for the /wallets endpoints this
-// ticket adds. WALLET_NOT_FOUND is the one code the wallets contract
-// answers with 404 rather than the generic correctable status; every other
-// correctable code on POST /wallets is explicitly 400 per this ticket
-// ("Entrada inválida ... devolve 400"), not the 422 the general wagering
+// statusForOperationError picks the status for the /wallets endpoints.
+// WALLET_NOT_FOUND is the one code the wallets contract answers with 404
+// rather than the generic correctable status; every other correctable code
+// on POST /wallets is explicitly 400, not the 422 the general wagering
 // contract table uses for its own correctable codes.
 func statusForOperationError(err *operation.Error) int {
 	if err.Code() == operation.CodeWalletNotFound {
@@ -87,12 +82,10 @@ func statusForOperationError(err *operation.Error) int {
 }
 
 // detailsForOperationError names the request field responsible for a
-// correctable error raised inside a use case - reachable, on POST /wallets,
-// only for a money-shaped rejection: an invalid playerId or a malformed
-// body are both caught earlier, at decode time, by classifyDecodeError and
-// the handler's own uuid.Parse check. Every other error kind (conflict,
-// unavailable, not found) carries no single field to blame, so it gets no
-// details.
+// correctable error raised inside a use case - on POST /wallets, only a
+// money-shaped rejection: an invalid playerId or a malformed body are both
+// caught earlier, at decode time. Every other error kind carries no single
+// field to blame, so it gets no details.
 func detailsForOperationError(err *operation.Error) []errorDetailItem {
 	switch err.Code() {
 	case operation.CodeInvalidMoney, operation.CodeUnsupportedCurrency:

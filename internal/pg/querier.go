@@ -11,12 +11,10 @@ import (
 )
 
 // Querier is the minimal pgx surface a repository needs to run a query. Both
-// *pgxpool.Pool and pgx.Tx satisfy it, so a repository method can be called
-// either directly against the pool - for a read that needs no transaction -
-// or against a transaction the UnitOfWork opened, without the repository
-// itself ever knowing which one it got or being able to begin, commit or
-// roll one back (spec: "os repositórios nunca abrem transação por conta
-// própria").
+// *pgxpool.Pool and pgx.Tx satisfy it, so a repository method can run
+// against the pool - for a read that needs no transaction - or against a
+// transaction the UnitOfWork opened, without ever knowing which one it got
+// or being able to begin, commit or roll one back.
 type Querier interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -27,9 +25,7 @@ type Querier interface {
 // transaction. A use case calls Execute and gets back a Querier already
 // bound to that transaction to hand to every repository call it makes;
 // Reader hands out the pool itself for read-only calls that need no
-// transaction boundary at all (spec: "a unidade de trabalho abre uma
-// transação pgx e entrega aos repositórios uma interface de consulta ligada
-// a ela").
+// transaction boundary at all.
 type UnitOfWork struct {
 	pool *pgxpool.Pool
 }
@@ -48,13 +44,12 @@ func (u *UnitOfWork) Reader() Querier {
 // Execute runs fn inside exactly one transaction: fn returning nil commits,
 // anything else - fn's own error, or a failed commit - rolls back and
 // returns that error. Rolling back an already-committed transaction is a
-// documented pgx no-op, so calling Rollback unconditionally after a failed
-// Commit is safe.
+// documented pgx no-op, so the unconditional Rollback after a failed Commit
+// is safe.
 //
-// The "before-commit" fault point (spec, "Injeção de falhas e ambiente")
-// fires here, right before Commit, for every use case that goes through this
-// single transaction boundary - HTTP's Process, ResumePending and every
-// other caller. A no-op outside a `faultinject` build.
+// The "before-commit" fault point fires here, right before Commit, for
+// every caller that goes through this single transaction boundary. A no-op
+// outside a `faultinject` build.
 func (u *UnitOfWork) Execute(ctx context.Context, fn func(ctx context.Context, q Querier) error) error {
 	tx, err := u.pool.Begin(ctx)
 	if err != nil {

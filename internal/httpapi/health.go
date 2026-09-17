@@ -14,9 +14,8 @@ import (
 // Readiness tracks whether the process is still accepting traffic and runs
 // the readiness dependency checks. shuttingDown flips to true as the very
 // first step of shutdown - see RegisterLifecycle in server.go - so
-// /health/ready starts failing before the HTTP server stops accepting
-// connections, giving the orchestrator a chance to stop routing new
-// requests here before Shutdown starts draining the old ones.
+// /health/ready fails before the server stops accepting connections, giving
+// the orchestrator time to route new requests elsewhere.
 type Readiness struct {
 	shuttingDown atomic.Bool
 	checks       []health.Named
@@ -37,8 +36,8 @@ type checkResult struct {
 	err  error
 }
 
-// evaluate runs every dependency check concurrently, each bounded by its own
-// slice of the shared timeout, and returns the failures.
+// evaluate runs every dependency check concurrently, under one shared
+// timeout, and returns the failures.
 func (r *Readiness) evaluate(ctx context.Context) []checkResult {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()

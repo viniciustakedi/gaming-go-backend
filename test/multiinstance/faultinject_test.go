@@ -10,11 +10,9 @@ import (
 	"time"
 )
 
-// This file is seam 3b's own fault-injection suite (spec, "Injeção de
-// falhas e ambiente" and ticket 16): the binary under test here is always
-// compiled with -race -tags faultinject (buildBinary), so every instance
-// below can be handed FAULT_INJECT_POINT and made to SIGKILL itself at one
-// of the five named points instrumented for this ticket - internal/pg
+// The binary under test here is always compiled with -race -tags faultinject
+// (buildBinary), so every instance below can be handed FAULT_INJECT_POINT and
+// made to SIGKILL itself at one of the instrumented points - internal/pg
 // (before-commit), internal/consumer (before-commit,
 // after-commit-before-delete, after-pending-reference-commit),
 // internal/walletapp (after-pending-reference-commit) and internal/outbox
@@ -25,13 +23,12 @@ import (
 // crash, always a real process killed mid-flight against the same Postgres,
 // MiniStack and Keycloak the healthy instances use.
 
-// TestMultiInstance_ConsumerDiesAfterCommitBeforeDelete_RedeliveredAndAcknowledgedOnce
-// is the ticket's own first scenario: the consumer commits the inbox row and
-// the wallet debit, then is killed before it can delete the SQS message.
-// Once its short visibility timeout expires, another instance receives the
-// redelivery, recognises it by the inbox's messageId and deletes it without
-// a second debit - the sqs_consumer_duplicate_messages_total counter is the
-// independent proof the redelivery actually reached the application.
+// The consumer commits the inbox row and the wallet debit, then is killed
+// before it can delete the SQS message. Once its short visibility timeout
+// expires, another instance receives the redelivery, recognises it by the
+// inbox's messageId and deletes it without a second debit - the
+// sqs_consumer_duplicate_messages_total counter is the independent proof the
+// redelivery actually reached the application.
 func TestMultiInstance_ConsumerDiesAfterCommitBeforeDelete_RedeliveredAndAcknowledgedOnce(t *testing.T) {
 	binary := buildBinary(t)
 	logDir := t.TempDir()
@@ -85,12 +82,10 @@ func TestMultiInstance_ConsumerDiesAfterCommitBeforeDelete_RedeliveredAndAcknowl
 	}
 }
 
-// TestMultiInstance_ConsumerDiesBeforeCommit_RedeliveryProcessesOnce is the
-// ticket's second scenario: the consumer is killed before its transaction
-// ever commits, so Postgres rolls back the dead connection's work and
-// nothing - not even the inbox row - survives. The redelivery therefore
-// looks like a first delivery to whichever instance receives it, and must
-// still produce exactly one debit.
+// The consumer is killed before its transaction ever commits, so Postgres
+// rolls back the dead connection's work and nothing - not even the inbox row
+// - survives. The redelivery therefore looks like a first delivery to
+// whichever instance receives it, and must still produce exactly one debit.
 func TestMultiInstance_ConsumerDiesBeforeCommit_RedeliveryProcessesOnce(t *testing.T) {
 	binary := buildBinary(t)
 	logDir := t.TempDir()
@@ -135,9 +130,7 @@ func TestMultiInstance_ConsumerDiesBeforeCommit_RedeliveryProcessesOnce(t *testi
 
 	waitExit(t, victim, 15*time.Second)
 
-	// The kill happened before the transaction that would have inserted
-	// both the inbox row and the wager transaction ever committed - an
-	// uncommitted row is never visible to another connection regardless of
+	// An uncommitted row is never visible to another connection regardless of
 	// how quickly Postgres notices the dead backend, so this is a direct
 	// assertion, not a race against cleanup.
 	if _, _, found := findTransactionByExternalID(t, ctx, conn, externalID); found {
@@ -169,13 +162,12 @@ func TestMultiInstance_ConsumerDiesBeforeCommit_RedeliveryProcessesOnce(t *testi
 	}
 }
 
-// TestMultiInstance_OutboxPublisherDiesAfterSendBeforeConfirm_AnotherInstanceRepublishesSameEventID
-// is the ticket's third scenario: opening a wallet commits two outbox
-// records; the victim's own publisher claims them and is killed right after
-// the first Send succeeds, before it can mark that record published. A
-// rescuer started afterward claims the expired lease on both records and
-// republishes - the already-sent one under the very same eventId, the other
-// for the first time - and no confirmed event is ever lost.
+// Opening a wallet commits two outbox records; the victim's own publisher
+// claims them and is killed right after the first Send succeeds, before it
+// can mark that record published. A rescuer started afterward claims the
+// expired lease on both records and republishes - the already-sent one under
+// the very same eventId, the other for the first time - and no confirmed
+// event is ever lost.
 func TestMultiInstance_OutboxPublisherDiesAfterSendBeforeConfirm_AnotherInstanceRepublishesSameEventID(t *testing.T) {
 	binary := buildBinary(t)
 	logDir := t.TempDir()
@@ -200,9 +192,8 @@ func TestMultiInstance_OutboxPublisherDiesAfterSendBeforeConfirm_AnotherInstance
 	// Between the victim's confirmed death and the rescuer's own start, the
 	// output queue must show exactly the one message the victim itself
 	// managed to send before it crashed - proof the Send genuinely reached
-	// the wire, not merely that published_at was left unset (review,
-	// correctness: a published_at-only check would pass identically if the
-	// crash point were moved to before Send, which never sends anything).
+	// the wire. A published_at-only check would pass identically if the crash
+	// point were moved to before Send, which never sends anything.
 	reader := newOutputReader(t)
 	if n := reader.drain(t, time.Now().Add(10*time.Second), want); n != 1 {
 		t.Fatalf("output queue delivered %d message(s) among the opened wallet's events before the rescuer started, want exactly 1 (the victim's own send)", n)
@@ -229,9 +220,9 @@ func TestMultiInstance_OutboxPublisherDiesAfterSendBeforeConfirm_AnotherInstance
 	// The victim crashes between Send and confirm on the very first record
 	// it ever touches - faultinject.Trigger fires unconditionally there, so
 	// it can never reach MarkPublished for anything. Every confirmation
-	// observed here therefore happened strictly after rescueStart, which
-	// only the surviving rescuer could have produced (review, correctness:
-	// DB-side proof of republication, independent of the queue).
+	// observed here therefore happened strictly after rescueStart, which only
+	// the surviving rescuer could have produced: DB-side proof of
+	// republication, independent of the queue.
 	for eventID := range want {
 		if !outboxPublishedAfter(t, ctx, conn, eventID, rescueStart) {
 			t.Errorf("event %s was confirmed published before the rescuer started, want confirmation strictly after - only the rescuer, not the dead victim, could have completed it", eventID)
@@ -244,10 +235,9 @@ func TestMultiInstance_OutboxPublisherDiesAfterSendBeforeConfirm_AnotherInstance
 			t.Errorf("event %s never reached the output queue after the publisher crash", eventID)
 		}
 	}
-	// The reader deduplicates by eventId (outputReader.applied), so every
-	// eventId is treated as processed exactly once above regardless of how
-	// many raw deliveries follow. What differs by outcome is only how many
-	// raw deliveries the *queue* itself carried for the republished event.
+	// The reader deduplicates by eventId (outputReader.applied), so what
+	// differs by outcome is only how many raw deliveries the *queue* itself
+	// carried for the republished event.
 	switch n := reader.rawDeliveries[firstEventID]; n {
 	case 1:
 		t.Logf("event %s (sent once by the victim) was never redelivered on the wire - MiniStack's FIFO five-minute deduplication window (spec, \"Outbox e eventos\") suppressed the rescuer's republish; the republication proof for this run is the DB-side outboxPublishedAfter check above, not the queue", firstEventID)
@@ -273,12 +263,10 @@ func TestMultiInstance_OutboxPublisherDiesAfterSendBeforeConfirm_AnotherInstance
 	}
 }
 
-// TestMultiInstance_OutboxPublisherDiesAfterClaimBeforeSend_LeaseExpiresAndAnotherInstancePublishes
-// is the ticket's fourth scenario: the victim claims the outbox batch -
-// pushing its lease - and is killed before ever calling Send. No message
-// ever reaches SQS from the victim; once the short lease it claimed with
-// expires, a rescuer claims the same records and is the one that actually
-// publishes them.
+// The victim claims the outbox batch - pushing its lease - and is killed
+// before ever calling Send. No message ever reaches SQS from the victim;
+// once the short lease it claimed with expires, a rescuer claims the same
+// records and is the one that actually publishes them.
 func TestMultiInstance_OutboxPublisherDiesAfterClaimBeforeSend_LeaseExpiresAndAnotherInstancePublishes(t *testing.T) {
 	binary := buildBinary(t)
 	logDir := t.TempDir()
@@ -304,11 +292,10 @@ func TestMultiInstance_OutboxPublisherDiesAfterClaimBeforeSend_LeaseExpiresAndAn
 			t.Fatalf("event %s already published before the victim ever sent anything", eventID)
 		}
 	}
-	// published_at alone only proves nothing was *confirmed* - that would
-	// look identical if the trigger fired after a real Send instead of
-	// before it (review, correctness). Peeking the output queue between the
-	// victim's confirmed death and the rescuer's start proves nothing was
-	// even attempted.
+	// published_at alone only proves nothing was *confirmed* - that would look
+	// identical if the trigger fired after a real Send instead of before it.
+	// Peeking the output queue between the victim's confirmed death and the
+	// rescuer's start proves nothing was even attempted.
 	requireNoOutputEvents(t, 5*time.Second, want)
 
 	startWithEnv(t, binary, logDir, "rescuer", nil)
@@ -329,12 +316,11 @@ func TestMultiInstance_OutboxPublisherDiesAfterClaimBeforeSend_LeaseExpiresAndAn
 	}
 }
 
-// TestMultiInstance_DiesAfterPendingReferenceCommit_AnotherInstanceWorkerCompletes
-// is the ticket's fifth scenario: a REFUND referencing a BET that has not
-// arrived yet is durably committed as PENDING_REFERENCE, and the victim is
-// killed right after that commit, before it can answer the request. Another
-// instance later receives the referenced BET, and that instance's own
-// pending-reference worker resolves the credit.
+// A REFUND referencing a BET that has not arrived yet is durably committed
+// as PENDING_REFERENCE, and the victim is killed right after that commit,
+// before it can answer the request. Another instance later receives the
+// referenced BET, and that instance's own pending-reference worker resolves
+// the credit.
 func TestMultiInstance_DiesAfterPendingReferenceCommit_AnotherInstanceWorkerCompletes(t *testing.T) {
 	binary := buildBinary(t)
 	logDir := t.TempDir()
@@ -381,14 +367,12 @@ func TestMultiInstance_DiesAfterPendingReferenceCommit_AnotherInstanceWorkerComp
 	}
 }
 
-// TestMultiInstance_RefundBeforeBet_SurvivesAllInstancesRestarted is the
-// ticket's sixth scenario: a REFUND arrives before its BET and is accepted
-// as PENDING_REFERENCE, every instance is then killed and a fresh trio
-// started in its place (the harness's own restartTrio - a plain,
-// undifferentiated crash of all three at once, not a single named fault
-// point), and only then does the BET arrive. The pendency has to survive
-// losing every instance's in-memory state and still resolve once its
-// reference exists.
+// A REFUND arrives before its BET and is accepted as PENDING_REFERENCE,
+// every instance is then killed and a fresh trio started in its place
+// (restartTrio - a plain, undifferentiated crash of all three at once, not a
+// single named fault point), and only then does the BET arrive. The pendency
+// has to survive losing every instance's in-memory state and still resolve
+// once its reference exists.
 func TestMultiInstance_RefundBeforeBet_SurvivesAllInstancesRestarted(t *testing.T) {
 	instances := startTrio(t)
 	ctx := context.Background()
@@ -439,15 +423,13 @@ func TestMultiInstance_RefundBeforeBet_SurvivesAllInstancesRestarted(t *testing.
 	}
 }
 
-// TestMultiInstance_CrossingHTTPAndSQS_ConsumerDiesMidway_SameOperationSettlesOnce
-// is the ticket's seventh scenario: the exact same BET is first submitted
-// over SQS to a victim killed after commit but before it can delete the
-// message, then replayed over plain HTTP against a different, healthy
-// instance while the original message is still invisible, and finally
-// redelivered over SQS once more to a third instance after the visibility
-// timeout expires. Every one of those three paths - the crashed SQS
-// delivery, the HTTP replay and the SQS redelivery - has to observe the
-// exact same settled operation, with only one debit ever applied.
+// The exact same BET is first submitted over SQS to a victim killed after
+// commit but before it can delete the message, then replayed over plain HTTP
+// against a different, healthy instance while the original message is still
+// invisible, and finally redelivered over SQS once more to a third instance
+// after the visibility timeout expires. Every one of those three paths - the
+// crashed SQS delivery, the HTTP replay and the SQS redelivery - has to
+// observe the exact same settled operation, with only one debit ever applied.
 func TestMultiInstance_CrossingHTTPAndSQS_ConsumerDiesMidway_SameOperationSettlesOnce(t *testing.T) {
 	binary := buildBinary(t)
 	logDir := t.TempDir()
@@ -458,8 +440,9 @@ func TestMultiInstance_CrossingHTTPAndSQS_ConsumerDiesMidway_SameOperationSettle
 	creds := loadSQSTestCreds(t)
 	gateway := newSQSClient(t, creds.gatewayKey, creds.gatewaySecret)
 
-	// Drains any message an earlier run of these tests left visible on the
-	// shared input queue first - see the first scenario's own comment above.
+	// Drains any message an earlier run left visible on the shared input
+	// queue, so the victim cannot die on a stray message instead of this
+	// scenario's own.
 	drainBacklog(t, binary, logDir, true)
 	victim := startWithEnv(t, binary, logDir, "victim", map[string]string{
 		"SQS_CONSUMER_ENABLED":            "true",
@@ -510,21 +493,17 @@ func TestMultiInstance_CrossingHTTPAndSQS_ConsumerDiesMidway_SameOperationSettle
 	}
 }
 
-// TestMultiInstance_TwoPublishersDisputeSameOutboxConcurrently_BothInstancesPublishPartOfTheBatch
-// is the re-review's own correction to the earlier version of this scenario
-// (correctness, spec): giving the peers a 5s poll interval against the
-// victim's default 250ms one let the victim's own next tick win the fresh
-// batch deterministically before either peer's next tick could even fire,
-// so the peers only ever raced each other over whatever the victim's lease
-// released afterward - proof of authorship, not of overlap. A publisher
-// serialized by timing would still have passed every assertion below it.
+// Every instance - peer-b, peer-c and the victim alike - polls every 100ms,
+// and the batch (20 wallets, 40 outbox rows) is large enough that no single
+// poll tick can drain it: reaching zero pending needs several rounds of FOR
+// UPDATE SKIP LOCKED claims from whichever instance's tick fires next, so
+// peer-b and peer-c end up genuinely racing each other for slices of the same
+// still-open batch, not for disjoint ones handed out in turn. Giving the
+// peers a slower poll interval than the victim would let the victim's next
+// tick win each fresh batch deterministically, leaving the peers to race only
+// over what its lease released afterward - proof of authorship, not of
+// overlap, which every assertion below would still pass.
 //
-// Here every instance - peer-b, peer-c and the victim alike - polls every
-// 100ms, and the batch (20 wallets, 40 outbox rows) is large enough that no
-// single poll tick can drain it: reaching zero pending needs several rounds
-// of FOR UPDATE SKIP LOCKED claims from whichever instance's tick fires
-// next, so peer-b and peer-c end up genuinely racing each other for slices
-// of the same still-open batch, not for disjoint ones handed out in turn.
 // The proof of that overlap never uses this test process's own wall clock:
 // instancePublishedSpan attributes each confirmed eventId to the instance
 // whose own log recorded publishing it, then reads that eventId's
@@ -533,10 +512,10 @@ func TestMultiInstance_CrossingHTTPAndSQS_ConsumerDiesMidway_SameOperationSettle
 // Two serialized publishers would produce two disjoint spans; this test
 // requires peer-b's and peer-c's spans to overlap.
 //
-// The victim's fault point still kills it right after its own first claim,
-// on the first record, abandoning that slice under a short lease for
-// whichever peer claims it next - the victim itself never confirms
-// anything, so it is deliberately absent from the overlap proof.
+// The victim's fault point kills it right after its own first claim, on the
+// first record, abandoning that slice under a short lease for whichever peer
+// claims it next - the victim itself never confirms anything, so it is
+// deliberately absent from the overlap proof.
 func TestMultiInstance_TwoPublishersDisputeSameOutboxConcurrently_BothInstancesPublishPartOfTheBatch(t *testing.T) {
 	binary := buildBinary(t)
 	logDir := t.TempDir()
@@ -580,9 +559,6 @@ func TestMultiInstance_TwoPublishersDisputeSameOutboxConcurrently_BothInstancesP
 		waitForOutboxPublished(t, ctx, conn, eventID, 30*time.Second)
 	}
 
-	// Every eventId in the batch is confirmed and reaches the reader exactly
-	// applied once - none confirmed is ever lost, and none is double-applied
-	// even though the two peers claimed slices independently.
 	seen := drainOutputEvents(t, time.Now().Add(20*time.Second), want)
 	for eventID := range want {
 		if seen[eventID] < 1 {
@@ -608,9 +584,9 @@ func TestMultiInstance_TwoPublishersDisputeSameOutboxConcurrently_BothInstancesP
 		t.Errorf("outbox_published_total peer-b=%.0f + peer-c=%.0f = %.0f, want %d (every event published exactly once between the two survivors)", publishedByB, publishedByC, total, len(want))
 	}
 
-	// The re-review's own correction: proof of temporal overlap, not just of
-	// authorship after the fact. A publisher serialized by timing produces
-	// two disjoint spans and fails this assertion.
+	// Proof of temporal overlap, not just of authorship after the fact. A
+	// publisher serialized by timing produces two disjoint spans and fails
+	// this assertion.
 	bSpan := instancePublishedSpan(t, ctx, conn, peerB, want)
 	cSpan := instancePublishedSpan(t, ctx, conn, peerC, want)
 	if !bSpan.overlaps(cSpan) {
@@ -626,17 +602,12 @@ func TestMultiInstance_TwoPublishersDisputeSameOutboxConcurrently_BothInstancesP
 	}
 }
 
-// TestMultiInstance_PendingReferenceExpiresAfterAllInstancesRestart_RejectedWithReferenceNotFound
-// is the review's own addition to the sixth scenario (spec): the existing
-// restart scenario only ever proves resolution (the referenced BET
-// eventually arrives). This one proves the other half the ticket names -
-// expiration "conforme a configuração" - survives the same full restart:
-// a REFUND is accepted as PENDING_REFERENCE, every instance is killed and a
-// fresh trio started in its place, and its BET never arrives at all. A
-// short REFERENCE_WORKER_MAX_ATTEMPTS (durable in wager_transactions.attempts,
-// so the restart cannot reset it) is what makes the pendency expire quickly
-// on either side of the restart, exactly the way the ticket's own attempt
-// -exhaustion alternative (as opposed to TTL) already works at seam 3a.
+// Pendency *expiration*, as opposed to the resolution the restart scenario
+// above covers: a REFUND is accepted as PENDING_REFERENCE, every instance is
+// killed and a fresh trio started in its place, and its BET never arrives at
+// all. A short REFERENCE_WORKER_MAX_ATTEMPTS (durable in
+// wager_transactions.attempts, so the restart cannot reset it) is what makes
+// the pendency expire quickly on either side of the restart.
 //
 // The short REFERENCE_WORKER_LEASE is what keeps the restart itself
 // bounded: next_attempt_at is also the lease, so a worker killed while
@@ -669,9 +640,7 @@ func TestMultiInstance_PendingReferenceExpiresAfterAllInstancesRestart_RejectedW
 
 	restartTrioWithEnv(t, instances, overrides)
 
-	// The BET referenced by betExternalID is deliberately never sent: this
-	// scenario is about expiration, not resolution (the sixth scenario
-	// already covers resolution surviving the same kind of restart).
+	// The BET referenced by betExternalID is deliberately never sent.
 	resolvedID := waitForTransactionStatus(t, ctx, conn, refundExternalID, "REJECTED", 20*time.Second)
 	if resolvedID != pendingID {
 		t.Errorf("resolved transaction id = %s, want %s (the same pendency created before the restart)", resolvedID, pendingID)

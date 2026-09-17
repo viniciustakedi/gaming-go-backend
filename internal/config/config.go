@@ -40,12 +40,10 @@ type LogConfig struct {
 
 type PostgresConfig struct {
 	// Host, Port, Name and SSLMode carry no secret: the app process never
-	// receives the migration owner's credentials (spec/ticket 06 review:
-	// "o serviço app não recebe nenhuma credencial do papel dono"). DSN is
-	// assembled from these four alone, so it can never carry userinfo
-	// either - only migrate and postgres-provisioning are handed the
-	// owner's own DATABASE_URL, read directly from the environment, never
-	// through this struct.
+	// receives the migration owner's credentials. DSN is assembled from
+	// those four alone, so it can never carry userinfo either - only
+	// migrate and postgres-provisioning are handed the owner's own
+	// DATABASE_URL, read directly from the environment.
 	Host               string
 	Port               string
 	Name               string
@@ -96,9 +94,8 @@ type SQSConsumerConfig struct {
 const SQSConsumerPostCancelDrain = 5 * time.Second
 
 // defaultFxStopTimeout is shared by StopTimeoutFromEnv, which arms the Fx
-// deadline, and Load, which validates that the same budget covers every
-// internal stop deadline. Two literals would let validation pass against a
-// ceiling the application never applies.
+// deadline, and Load, which validates it. Two literals would let validation
+// pass against a ceiling the application never applies.
 const defaultFxStopTimeout = 60 * time.Second
 
 // OutboxConfig bounds how much work one publisher claims and how long a
@@ -139,14 +136,12 @@ type AuthConfig struct {
 	// (discoveryURL + "/.well-known/openid-configuration"), used only to
 	// fetch the provider's configuration and JWKS - never compared against
 	// a token's "iss". It defaults to IssuerURL, the right value whenever a
-	// single host reaches Keycloak (local `go test`, test/integration), and
-	// is set to Keycloak's internal Compose address for the app container,
-	// which cannot reach IssuerURL's host-facing address (ticket 07:
-	// "separe issuer esperado de URL de descoberta e JWKS").
+	// single host reaches Keycloak, and is set to Keycloak's internal
+	// Compose address for the app container, which cannot reach
+	// IssuerURL's host-facing address.
 	DiscoveryURL string
 	// Audience is the "aud" every accepted token must carry - the audience
-	// mapper on each Keycloak client in this realm stamps it there (spec,
-	// decision 7).
+	// mapper on each Keycloak client in this realm stamps it there.
 	Audience string
 	// ClockSkew is the tolerance internal/auth's verifier grants a token's
 	// expiry against this process's own clock.
@@ -163,13 +158,10 @@ type AuthConfig struct {
 var rootAccessKeyID12Digits = regexp.MustCompile(`^\d{12}$`)
 
 // StopTimeoutFromEnv reads FX_STOP_TIMEOUT with the same default Load uses,
-// without running full validation. fx.StopTimeout must be set as a static
-// option before fx.New builds the container, which is before any
-// fx.Provide constructor - including Load itself - has run, so this is the
-// one setting the composition root needs outside the normal DI flow. Actual
-// validation of this value still happens through Load; an invalid duration
-// here silently falls back to the default and the real error surfaces from
-// Load moments later, when the Fx graph is built.
+// without running full validation: fx.StopTimeout is a static option, set
+// before fx.New builds the container and so before Load itself runs. An
+// invalid duration falls back to the default here, and Load surfaces the
+// real error moments later.
 func StopTimeoutFromEnv() time.Duration {
 	var discarded []error
 	return getDuration("FX_STOP_TIMEOUT", defaultFxStopTimeout, &discarded)
@@ -197,11 +189,10 @@ func Load() (Config, error) {
 	if cfg.Postgres.Host == "" {
 		errs = append(errs, errors.New("DATABASE_HOST: required"))
 	} else if strings.Contains(cfg.Postgres.Host, "@") {
-		// The only way userinfo could ever reach the DSN this package
-		// assembles below: reject it here rather than let it flow through
-		// silently (ticket 06 review: "falhar se o app receber userinfo no
-		// DSN"). The app derives its actual connection exclusively from
-		// AppCredentialsFile - see internal/pg.AppDSN.
+		// The only way userinfo could ever reach the DSN assembled
+		// below: reject it here rather than let it flow through
+		// silently. The app derives its actual connection exclusively
+		// from AppCredentialsFile - see internal/pg.AppDSN.
 		errs = append(errs, errors.New("DATABASE_HOST: must not contain credentials (userinfo); the app derives its Postgres connection only from DATABASE_APP_CREDENTIALS_FILE"))
 	}
 	cfg.Postgres.Port = getEnv("DATABASE_PORT", "5432")
@@ -215,16 +206,13 @@ func Load() (Config, error) {
 	}
 	cfg.Postgres.PingTimeout = getDuration("DATABASE_PING_TIMEOUT", 5*time.Second, &errs)
 	cfg.Postgres.MaxConns = getInt32("DATABASE_MAX_CONNS", 10, &errs)
-	// The app never receives the migration owner's credentials at all: DSN
-	// above carries no userinfo, and pg.New/pg.AppDSN adds wallet_app's
-	// least-privilege role on top of it, with the password read only from
-	// this file - generated at runtime by deploy/postgres/provision.sh,
-	// never versioned. See internal/pg.AppDSN and README.md's "Credenciais
-	// do Postgres".
+	// The app never receives the migration owner's credentials: DSN above
+	// carries no userinfo, and pg.AppDSN adds wallet_app's least-privilege
+	// role on top of it, with the password read only from this file -
+	// generated at runtime by deploy/postgres/provision.sh, never versioned.
 	cfg.Postgres.AppCredentialsFile = getEnv("DATABASE_APP_CREDENTIALS_FILE", "deploy/postgres/.runtime/credentials.env")
-	// Session-level GUCs (spec: "As sessões Postgres usam lock_timeout e
-	// statement_timeout, e estourar qualquer um deles é falha transitória"),
-	// applied per-connection by pg.New through pgx's RuntimeParams.
+	// Session-level GUCs, applied per-connection by pg.New through pgx's
+	// RuntimeParams. Exhausting either one is a transient failure.
 	cfg.Postgres.LockTimeout = getDuration("DATABASE_LOCK_TIMEOUT", 3*time.Second, &errs)
 	cfg.Postgres.StatementTimeout = getDuration("DATABASE_STATEMENT_TIMEOUT", 5*time.Second, &errs)
 
@@ -300,20 +288,19 @@ func Load() (Config, error) {
 		errs = append(errs, errors.New("AUTH_AUDIENCE: must not be empty"))
 	}
 	cfg.Auth.ClockSkew = getDuration("AUTH_CLOCK_SKEW", 5*time.Second, &errs)
-	// Keycloak's own boot - including the realm import docker-compose.yml's
-	// keycloak service runs on every cold start - routinely takes longer
-	// than every other dependency this process waits on, so the default
-	// here is generous rather than matched to SQS_STARTUP_TIMEOUT's 10s.
+	// Keycloak's own boot, including the realm import that runs on every
+	// cold start, routinely takes longer than every other dependency this
+	// process waits on, so this default is generous rather than matched to
+	// SQS_STARTUP_TIMEOUT's 10s.
 	cfg.Auth.DiscoveryTimeout = getDuration("AUTH_DISCOVERY_TIMEOUT", 45*time.Second, &errs)
 
 	cfg.Fx.StopTimeout = getDuration("FX_STOP_TIMEOUT", defaultFxStopTimeout, &errs)
 
 	// internalStopDeadline sums every stop-side deadline the shutdown
-	// sequence already waits on before the pools close. fx.StopTimeout must exceed that sum, or the Fx-wide deadline can
-	// expire while a component is still draining within its own, smaller
-	// budget (spec: "fx.StopTimeout configurado acima da soma dos prazos
-	// internos"). Extend this sum if a future stop hook gains its own
-	// configurable deadline.
+	// sequence already waits on before the pools close. fx.StopTimeout must
+	// exceed that sum, or the Fx-wide deadline can expire while a component
+	// is still draining within its own, smaller budget. Extend this sum if a
+	// future stop hook gains its own configurable deadline.
 	internalStopDeadline := cfg.HTTP.ShutdownTimeout + cfg.SQS.Consumer.ShutdownTimeout + SQSConsumerPostCancelDrain + cfg.ReferenceWorker.ShutdownTimeout
 	if cfg.Fx.StopTimeout <= internalStopDeadline {
 		errs = append(errs, fmt.Errorf("FX_STOP_TIMEOUT: must be greater than the sum of internal stop deadlines (%s), got %s", internalStopDeadline, cfg.Fx.StopTimeout))
@@ -325,11 +312,10 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// requireRoleCredentials rejects missing keys and, just as importantly,
-// rejects MiniStack's two root bypass shapes: the literal "test" key and any
-// 12-digit numeric key. Both skip every IAM policy in MiniStack, so refusing
-// them here is what makes "a aplicação nunca usa as chaves root" a property
-// the process enforces, not just a convention the operator has to remember.
+// requireRoleCredentials rejects missing keys and MiniStack's two root bypass
+// shapes: the literal "test" key and any 12-digit numeric key. Both skip every
+// IAM policy in MiniStack, so refusing them here makes "never use the root
+// keys" a property the process enforces rather than a convention.
 func requireRoleCredentials(errs *[]error, prefix, accessKeyID, secretAccessKey string) {
 	if accessKeyID == "" {
 		*errs = append(*errs, fmt.Errorf("%s_ACCESS_KEY_ID: required", prefix))
@@ -359,9 +345,8 @@ func getEnv(key, fallback string) string {
 
 // getDuration requires a strictly positive duration: zero blocks any I/O
 // timeout from ever firing, and a negative one makes context.WithTimeout
-// build an already-expired context, so both are rejected the same way a
-// malformed value is - Load fails fast instead of the process discovering
-// the bad value only when the first timeout misbehaves at runtime.
+// build an already-expired context, so Load fails fast on both rather than
+// letting a timeout misbehave at runtime.
 func getDuration(key string, fallback time.Duration, errs *[]error) time.Duration {
 	v, ok := os.LookupEnv(key)
 	if !ok || v == "" {

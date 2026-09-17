@@ -12,25 +12,20 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/faultinject"
 )
 
-// Channel labels the transport an operation arrived on, for metrics and
-// logging that must tell HTTP and SQS attempts apart even though both call
-// the exact same use case (spec: "operações por canal").
+// Channel labels the transport an operation arrived on, so metrics and logging
+// can tell HTTP and SQS attempts apart even though both call the same use case.
 const (
 	ChannelHTTP = "HTTP"
 	ChannelSQS  = "SQS"
 )
 
-// ErrRetryInNewTransaction signals that the wager-transaction INSERT found
-// nothing to insert (spec, decision 3, step 5's ON CONFLICT DO NOTHING
-// backstop): a concurrent writer whose request body carried a different
-// walletId, and so never contended for the same FOR UPDATE lock, already
-// committed the same (providerId, idempotencyKey) or (providerId,
-// externalTransactionId) pair. ExecuteInTx never retries this itself - the
-// winner's commit is only visible once this transaction is gone, so
-// whoever owns the transaction (Process, below, for HTTP; the SQS
-// consumer's inbox transaction, in ticket 13) must roll it back and call
-// ExecuteInTx again in a brand new one. Exported so both callers can
-// recognise it with errors.Is.
+// ErrRetryInNewTransaction signals that the wager-transaction INSERT hit ON
+// CONFLICT DO NOTHING: a concurrent writer that named a different walletId, and
+// so never contended for the same FOR UPDATE lock, already committed the same
+// (providerId, idempotencyKey) or (providerId, externalTransactionId) pair.
+// ExecuteInTx cannot retry this itself - the winner's commit only becomes
+// visible once this transaction is gone - so the transaction's owner must roll
+// back and call ExecuteInTx again in a brand new one.
 var ErrRetryInNewTransaction = errors.New("walletapp: wager insert conflicted, retry in a new transaction")
 
 // ErrCorruptedResultingBalance is returned when a persisted resulting
@@ -46,11 +41,9 @@ var ErrCorruptedResultingBalance = errors.New("walletapp: persisted balance is n
 var ErrInvalidPersistedTransaction = errors.New("walletapp: persisted transaction violates invariants")
 
 // ErrOperationNotPrepared is returned when ExecuteInTx is handed a
-// PreparedOperation that Prepare did not produce - the zero value, above
-// all, since PreparedOperation exposes no exported fields and no exported
-// constructor other than Prepare. ExecuteInTx checks this before touching
-// any repository, so a caller that skips Prepare gets a classified error
-// instead of an arbitrary hash and decision reaching the database.
+// PreparedOperation that Prepare did not produce - the zero value, above all.
+// It is checked before any repository is touched, so a caller that skips
+// Prepare cannot get an unvalidated hash and decision into the database.
 var ErrOperationNotPrepared = errors.New("walletapp: PreparedOperation was not produced by Prepare")
 
 // ProcessOperationInput is everything ProcessOperationUseCase needs beyond
@@ -59,8 +52,7 @@ type ProcessOperationInput struct {
 	Request        operation.Request
 	IdempotencyKey string
 	// CorrelationID ties every outbox event this call writes back to the
-	// request or message that caused them (spec: "correlationId vem do
-	// header X-Correlation-Id ou é gerado no HTTP; no SQS, é o messageId").
+	// request or message that caused them.
 	CorrelationID string
 	// CausationID identifies the command that directly caused emitted events.
 	// HTTP has none; the SQS adapter supplies its messageId.
@@ -68,10 +60,9 @@ type ProcessOperationInput struct {
 	Channel     string
 }
 
-// ProcessOperationResult is the stable, replay-safe answer the provider
-// contract promises: transaction id, terminal status, failure code when
-// rejected, the balance observed at that exact processing, and whether this
-// answer came from a fresh attempt or a replay of one already persisted.
+// ProcessOperationResult is the replay-safe answer the provider contract
+// promises. Balance is the balance observed at that exact processing, not the
+// wallet's current one, so a replay never drifts from the original answer.
 type ProcessOperationResult struct {
 	TransactionID    string
 	Status           domainwallet.TransactionStatus
@@ -83,8 +74,8 @@ type ProcessOperationResult struct {
 }
 
 // PendingResumeSettings controls one durable pending-reference retry. The
-// worker supplies these values from configuration, keeping HTTP/SQS request
-// processing free from polling concerns.
+// worker supplies these from configuration, keeping HTTP/SQS request
+// processing free of polling concerns.
 type PendingResumeSettings struct {
 	MaxAttempts int
 	RetryDelay  time.Duration
@@ -98,49 +89,39 @@ const (
 	PendingRejected    PendingResumeOutcome = "rejected"
 )
 
-// PreparedOperation is Prepare's result: an input already validated and
-// hashed, ready for ExecuteInTx to run against a transaction's repositories
-// without repeating either step (spec, decision 3, step 1: "validar e
-// calcular o hash fora da transação"). Ticket 13's SQS consumer builds one
-// of these outside its inbox transaction, exactly as Process does below for
-// HTTP, then hands it to ExecuteInTx inside that transaction.
+// PreparedOperation is Prepare's result: an input already validated and hashed,
+// so ExecuteInTx can run it against a transaction's repositories without
+// repeating either step. Callers build one outside the transaction, then hand
+// it to ExecuteInTx inside it.
 //
-// Every field is unexported and there is no exported constructor other than
-// Prepare, so a PreparedOperation carrying a hash or decision ExecuteInTx
-// did not itself produce cannot be assembled outside this package - by
-// struct literal or otherwise. ExecuteInTx also rejects the zero value (see
-// ready, below) rather than trust an unprepared or forged one.
+// Every field is unexported and Prepare is the only constructor, so a
+// PreparedOperation carrying a hash or decision this package did not produce
+// cannot be assembled elsewhere.
 type PreparedOperation struct {
 	input    ProcessOperationInput
 	hash     string
 	decision operation.Decision
-	// ready is set only by Prepare. Its zero value, false, is what every
-	// PreparedOperation{} literal built outside this package carries, so
-	// ExecuteInTx uses it to reject anything Prepare did not produce.
+	// ready is set only by Prepare, so its false zero value is what every
+	// literal built elsewhere carries and ExecuteInTx rejects.
 	ready bool
 }
 
-// Hash returns the canonical PayloadHash Prepare computed for this
-// operation, for callers (tests, mainly) that need to read what Prepare
-// decided without being able to construct or mutate a PreparedOperation.
+// Hash returns the canonical PayloadHash Prepare computed for this operation.
 func (p PreparedOperation) Hash() string {
 	return p.hash
 }
 
-// Decision returns the domain decision Prepare evaluated for this
-// operation.
+// Decision returns the domain decision Prepare evaluated for this operation.
 func (p PreparedOperation) Decision() operation.Decision {
 	return p.decision
 }
 
-// ProcessOperationUseCase is the shared processing use case HTTP and SQS
-// both call (spec: "um caso de uso de processamento compartilhado"). It
-// implements decision 3's concurrency flow in full: validate and hash
-// outside any transaction, lock the wallet row, classify the attempt against
-// whatever is already committed, insert with ON CONFLICT DO NOTHING and
-// reclassify in a fresh transaction if that finds nothing to insert, then
-// apply the movement, the ledger entry, the wallet update and the outbox
-// records in the one transaction that commits.
+// ProcessOperationUseCase is the processing use case HTTP and SQS both call.
+// The concurrency flow: validate and hash outside any transaction, lock the
+// wallet row, classify the attempt against whatever is already committed,
+// insert with ON CONFLICT DO NOTHING and reclassify in a fresh transaction if
+// that finds nothing to insert, then apply the movement, ledger entry, wallet
+// update and outbox records in the one transaction that commits.
 type ProcessOperationUseCase struct {
 	uow        UnitOfWork
 	metrics    OperationMetrics
@@ -155,30 +136,23 @@ func NewProcessOperationUseCase(uow UnitOfWork, metrics OperationMetrics) *Proce
 }
 
 // SetPendingReferenceTTL applies the configured lifetime before an accepted
-// out-of-order operation is finally rejected. It is called during Fx graph
-// construction, before either HTTP or SQS workers start.
+// out-of-order operation is finally rejected. Called during Fx graph
+// construction, before any worker starts.
 func (uc *ProcessOperationUseCase) SetPendingReferenceTTL(ttl time.Duration) {
 	if ttl > 0 {
 		uc.pendingTTL = ttl
 	}
 }
 
-// Prepare runs decision 3's step 1 - validate the idempotency key, compute
-// the canonical PayloadHash, and evaluate the request against the domain
-// rules that need no database state - entirely outside any transaction. A
-// correctable input error (a bad idempotency key, an unhashable payload, a
-// forbidden reference, ...) comes back classified here, before ExecuteInTx
-// - and the transaction it runs inside - is ever invoked: an entry a
-// provider can simply retry with a corrected body must never open and roll
-// back a database transaction to say so.
+// Prepare validates the idempotency key, computes the canonical PayloadHash and
+// evaluates the domain rules that need no database state, all outside any
+// transaction: a request the provider can simply retry with a corrected body
+// must never open and roll back a database transaction to say so.
 //
-// Evaluate is called with no resolved reference, which is final for BET,
-// WIN without a reference and LOSS - none of them ever need one. For
-// REFUND, ROLLBACK or a WIN that names a reference, Evaluate always answers
-// WaitForReference here (it is deliberately given no reference to resolve
-// against); ExecuteInTx's resolveDecision reruns Evaluate with the
-// reference actually resolved from the database, under the wallet lock,
-// once ExecuteInTx has one to offer (decision 3, step 4).
+// Evaluate is called with no resolved reference, which is final for BET, WIN
+// without a reference and LOSS. REFUND, ROLLBACK and a referenced WIN therefore
+// always answer WaitForReference here; resolveDecision reruns Evaluate under
+// the wallet lock once it has the reference from the database.
 func (uc *ProcessOperationUseCase) Prepare(input ProcessOperationInput) (PreparedOperation, error) {
 	if !isValidIdempotencyKey(input.IdempotencyKey) {
 		return PreparedOperation{}, operation.ErrMissingIdempotencyKey
@@ -197,27 +171,17 @@ func (uc *ProcessOperationUseCase) Prepare(input ProcessOperationInput) (Prepare
 	return PreparedOperation{input: input, hash: hash, decision: decision, ready: true}, nil
 }
 
-// ExecuteInTx runs decision 3's steps 2-6 - lock the wallet, classify the
-// attempt against whatever is already committed, INSERT with ON CONFLICT DO
-// NOTHING, the version-conditioned wallet UPDATE, the ledger entry and the
-// outbox records - using only the repositories it is handed and a
-// PreparedOperation that Prepare has already validated and hashed. It never
-// repeats that validation or hashing, and it never opens or closes a
-// transaction itself: Process (below) binds it to the transaction its own
-// UnitOfWork opens for HTTP, and ticket 13's SQS consumer is meant to bind
-// it to the very transaction its inbox insert commits in, so a failure
-// between the two can never leave the wallet movement committed without the
-// inbox record, or the other way around.
+// ExecuteInTx locks the wallet, classifies the attempt against what is already
+// committed, INSERTs with ON CONFLICT DO NOTHING, then applies the
+// version-conditioned wallet UPDATE, the ledger entry and the outbox records.
+// It never opens or closes a transaction itself, so the SQS consumer can bind
+// it to the very transaction its inbox insert commits in: a failure between the
+// two can then never leave the wallet movement committed without the inbox
+// record, or the other way around.
 //
-// A concurrent INSERT collision (step 5's backstop finding nothing to
-// insert) is reported as ErrRetryInNewTransaction rather than retried here:
-// reclassifying needs the winning writer's commit to already be visible,
-// which only a fresh transaction can guarantee.
-//
-// A PreparedOperation that did not come from Prepare - the zero value,
-// above all - is rejected as ErrOperationNotPrepared before any repository
-// is touched: no panic, no query, no chance of persisting a hash or
-// decision this use case never actually validated.
+// A concurrent INSERT collision comes back as ErrRetryInNewTransaction rather
+// than being retried here, since reclassifying needs the winning writer's
+// commit to already be visible.
 func (uc *ProcessOperationUseCase) ExecuteInTx(ctx context.Context, repos Repositories, prepared PreparedOperation) (ProcessOperationResult, error) {
 	if !prepared.ready {
 		return ProcessOperationResult{}, ErrOperationNotPrepared
@@ -235,14 +199,11 @@ func (uc *ProcessOperationUseCase) ExecuteInTx(ctx context.Context, repos Reposi
 	return result, nil
 }
 
-// Process is the HTTP-facing entry point: it runs Prepare outside any
-// transaction, then opens its own UnitOfWork transaction around ExecuteInTx
-// and, on ErrRetryInNewTransaction, rolls back and retries exactly once in a
-// brand new transaction (spec, decision 3, step 5: "faz rollback e
-// classifica em nova transação"). A correctable Prepare error never reaches
-// the UnitOfWork at all. Every corrigible or conflicting outcome (a
-// *operation.Error) is returned unpersisted; a nil error always carries a
-// terminal ProcessOperationResult.
+// Process is the HTTP-facing entry point: Prepare outside any transaction, then
+// ExecuteInTx inside its own UnitOfWork transaction, rolling back and retrying
+// once in a fresh transaction on ErrRetryInNewTransaction. Every corrigible or
+// conflicting outcome (an *operation.Error) is returned unpersisted; a nil
+// error always carries a terminal ProcessOperationResult.
 func (uc *ProcessOperationUseCase) Process(ctx context.Context, input ProcessOperationInput) (ProcessOperationResult, error) {
 	started := uc.now()
 
@@ -256,11 +217,9 @@ func (uc *ProcessOperationUseCase) Process(ctx context.Context, input ProcessOpe
 		return ProcessOperationResult{}, err
 	}
 
-	// The "after commit of PENDING_REFERENCE" fault point (spec, "Injeção de
-	// falhas e ambiente") fires only for a freshly committed pending row, not
-	// a replay of one already persisted: processWithRetry's transaction has
-	// already committed by the time control returns here, so this is
-	// genuinely post-commit, not a substitute for a trigger placed before it.
+	// processWithRetry's transaction has already committed by the time control
+	// returns here, so this fault point is genuinely post-commit. It fires only
+	// for a freshly committed pending row, never for a replay of one.
 	if result.Status == domainwallet.PendingReference && !result.IdempotentReplay {
 		faultinject.Trigger("after-pending-reference-commit")
 	}
@@ -270,9 +229,9 @@ func (uc *ProcessOperationUseCase) Process(ctx context.Context, input ProcessOpe
 }
 
 // RecordOutcome records the observability side effects of a completed
-// operation. HTTP calls it through Process, while the SQS adapter calls it
-// only after committing its inbox transaction, so both transports contribute
-// to the same channel-labelled operation, replay, and latency metrics.
+// operation. HTTP calls it through Process; the SQS adapter calls it only after
+// committing its inbox transaction, so both feed the same channel-labelled
+// operation, replay and latency metrics.
 func (uc *ProcessOperationUseCase) RecordOutcome(channel string, result ProcessOperationResult, err error, duration time.Duration) {
 	if err != nil {
 		return
@@ -283,13 +242,10 @@ func (uc *ProcessOperationUseCase) RecordOutcome(channel string, result ProcessO
 	}
 }
 
-// processWithRetry runs ExecuteInTx inside one fresh transaction and, on a
-// concurrent INSERT collision, retries exactly once more in another fresh
-// transaction - by then the winning writer has committed, so ExecuteInTx's
-// own lookupExisting step finds its row and answers with a replay or a
-// conflict instead of trying to insert again. A second collision in a row
-// is not retried further: it is reported as a transient failure, which the
-// HTTP layer answers with 503 and Retry-After.
+// processWithRetry retries a concurrent INSERT collision exactly once in a
+// fresh transaction: by then the winning writer has committed, so
+// lookupExisting finds its row and answers with a replay or a conflict. A
+// second collision is reported as transient, which HTTP answers with 503.
 func (uc *ProcessOperationUseCase) processWithRetry(ctx context.Context, prepared PreparedOperation) (ProcessOperationResult, error) {
 	result, err := uc.runInNewTx(ctx, prepared)
 	if !errors.Is(err, ErrRetryInNewTransaction) {
@@ -317,11 +273,9 @@ func (uc *ProcessOperationUseCase) runInNewTx(ctx context.Context, prepared Prep
 	return result, err
 }
 
-// attempt runs one full pass of the concurrency flow's steps 2-6 within a
-// single transaction's repositories: lock the wallet, classify the attempt,
-// and - for a genuinely new one - process it. retry reports that the
-// caller must roll back and reclassify in a fresh transaction (the step-5
-// backstop).
+// attempt runs one full pass within a single transaction's repositories: lock
+// the wallet, classify the attempt, and process a genuinely new one. retry
+// reports that the caller must roll back and reclassify in a fresh transaction.
 func (uc *ProcessOperationUseCase) attempt(ctx context.Context, repos Repositories, input ProcessOperationInput, hash string, decision operation.Decision, now time.Time) (result ProcessOperationResult, retry bool, err error) {
 	req := input.Request
 
@@ -590,22 +544,17 @@ func (uc *ProcessOperationUseCase) processPending(ctx context.Context, repos Rep
 	return nil
 }
 
-// resolveDecision finalizes prepared's preliminary decision for a genuinely
-// new attempt. BET, WIN without a reference and LOSS already carry their
-// final Decision from Prepare - Action is Process and there is nothing to
-// resolve. REFUND, ROLLBACK and a WIN naming a reference always come back
-// from Prepare as WaitForReference, since Prepare's own Evaluate call was
-// deliberately given no reference; this looks the reference up by
-// (providerId, referenceExternalTransactionId), scoped to the same
-// provider (spec: "a referência é resolvida por (providerId,
-// referenceExternalTransactionId)"), and - once it is PROCESSED - whether
-// it already carries a successful reversal, then reruns Evaluate for the
-// definitive answer (spec, decision 3, step 4: "resolve a referência ... e
-// aplica as regras de domínio"). The reference is visible here, not raced,
-// because every write that could produce or change it also has to hold
-// this same wallet's FOR UPDATE lock first - REFUND, ROLLBACK and a
-// referenced WIN all require reference.WalletID() == req.WalletID, so they
-// can never disagree about which wallet's lock protects them.
+// resolveDecision finalizes Prepare's preliminary decision. BET, WIN without a
+// reference and LOSS are already final. The rest arrive as WaitForReference:
+// this looks the reference up by (providerId, referenceExternalTransactionId),
+// checks whether a PROCESSED one already carries a successful reversal, and
+// reruns Evaluate for the definitive answer.
+//
+// The reference is visible here rather than raced because every write that
+// could produce or change it must hold this same wallet's FOR UPDATE lock
+// first: REFUND, ROLLBACK and a referenced WIN all require
+// reference.WalletID() == req.WalletID, so they can never disagree about which
+// wallet's lock protects them.
 func (uc *ProcessOperationUseCase) resolveDecision(ctx context.Context, repos Repositories, req operation.Request, decision operation.Decision) (operation.Decision, *domainwallet.WagerTransaction, error) {
 	if decision.Action != operation.WaitForReference {
 		return decision, nil, nil
@@ -634,10 +583,9 @@ func (uc *ProcessOperationUseCase) resolveDecision(ctx context.Context, repos Re
 	return resolved, reference, nil
 }
 
-// lookupExisting classifies the attempt against whatever the same provider
-// has already committed (spec, decision 3, step 3). handled is true when the
-// classification alone answers the request - a replay or a conflict - and
-// false for a genuinely new attempt the caller should go on to process.
+// lookupExisting classifies the attempt against whatever the same provider has
+// already committed. handled is true when the classification alone answers the
+// request - a replay or a conflict - and false for a genuinely new attempt.
 func (uc *ProcessOperationUseCase) lookupExisting(ctx context.Context, repos Repositories, req operation.Request, idempotencyKey, hash string) (result ProcessOperationResult, handled bool, err error) {
 	byKey, err := findExisting(ctx, repos.Transactions.FindByIdempotencyKey, req.ProviderID, idempotencyKey)
 	if err != nil {
@@ -682,11 +630,10 @@ func toAttempt(record *ExistingTransaction) *operation.Attempt {
 	return &operation.Attempt{IdempotencyKey: record.IdempotencyKey, PayloadHash: record.PayloadHash, ExternalTransactionID: record.ExternalTransactionID}
 }
 
-// replayResult rebuilds the exact answer the original processing computed,
-// so a replay never drifts from it even if the wallet has moved since
-// (spec: "a replay devolve o saldo daquele momento"). A persisted balance
-// that can no longer be rebuilt into a valid Money is a corrupted record,
-// not something to answer with a silently-zeroed balance.
+// replayResult rebuilds the exact answer the original processing computed, so a
+// replay never drifts from it even if the wallet has moved since. A persisted
+// balance that no longer rebuilds into a valid Money is a corrupted record, not
+// something to answer with a silently-zeroed balance.
 func replayResult(record *ExistingTransaction) (ProcessOperationResult, error) {
 	result := ProcessOperationResult{TransactionID: record.TransactionID, Status: record.Status, FailureCode: record.FailureCode, PendingExpiresAt: record.PendingExpiresAt, IdempotentReplay: true}
 	if record.ResultingBalance == nil {
@@ -700,13 +647,11 @@ func replayResult(record *ExistingTransaction) (ProcessOperationResult, error) {
 	return result, nil
 }
 
-// processNew builds and persists a genuinely new attempt: the transaction
-// row, its movement (if any), the ledger entry and wallet update it produces,
-// and the outbox events for the conclusion. reference is the reference
-// resolveDecision resolved, nil for BET, LOSS and a WIN with none - its id,
-// when present, is what gets persisted as the transaction's own resolved
-// referenceTransactionID (spec: "a referência resolvida fica persistida"),
-// whether decision ultimately processes or rejects the operation.
+// processNew builds and persists a genuinely new attempt: the transaction row,
+// its movement (if any), the ledger entry and wallet update, and the outbox
+// events. reference is what resolveDecision resolved, nil for BET, LOSS and an
+// unreferenced WIN; its id is persisted as the transaction's own
+// referenceTransactionID whether the decision processes or rejects.
 func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Repositories, walletValue *domainwallet.Wallet, input ProcessOperationInput, hash string, decision operation.Decision, reference *domainwallet.WagerTransaction, now time.Time) (ProcessOperationResult, bool, error) {
 	req := input.Request
 
@@ -739,16 +684,12 @@ func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Reposit
 		rejectionCode *operation.Error
 	)
 	switch {
-	// A reference that resolved to a durable rejection (REFERENCE_NOT_
-	// PROCESSED, REFERENCE_ALREADY_REVERSED, REFERENCE_MISMATCH,
-	// REFERENCE_AMOUNT_MISMATCH, REFERENCE_KIND_NOT_REVERSIBLE) never
-	// attempts a movement: decision.Error already carries the exact code
-	// operation.Evaluate classified it under.
+	// A durable rejection never attempts a movement: decision.Error already
+	// carries the code operation.Evaluate classified it under.
 	case decision.Action == operation.Reject:
 		rejectionCode = decision.Error
-	// LOSS carries an empty Direction and never calls Debit or Credit, so
-	// its version never changes (spec: "LOSS não chama débito nem crédito,
-	// então a versão não muda").
+	// LOSS carries an empty Direction and never calls Debit or Credit, so its
+	// wallet version never changes.
 	case decision.Direction != "":
 		ledgerEntryID, err := newID()
 		if err != nil {
@@ -764,12 +705,9 @@ func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Reposit
 			if !errors.Is(err, domainwallet.ErrInsufficientFunds) {
 				return ProcessOperationResult{}, false, fmt.Errorf("walletapp: apply movement: %w", err)
 			}
-			// A BET without enough balance, or a reversal that would leave
-			// the balance negative, is a durable, auditable rejection, not a
-			// transient failure: it is still persisted below, with wallet
-			// and version left untouched (spec: "aposta sem saldo é
-			// rejeitada como REJECTED com INSUFFICIENT_FUNDS"; "reversão com
-			// débito acima do saldo devolve REVERSAL_INSUFFICIENT_FUNDS").
+			// Insufficient funds is a durable, auditable rejection, not a
+			// transient failure: it is still persisted below, with the wallet
+			// and its version left untouched.
 			rejectionCode = operation.InsufficientFundsFor(req.Kind)
 		}
 	}
@@ -821,9 +759,7 @@ func (uc *ProcessOperationUseCase) processNew(ctx context.Context, repos Reposit
 
 // writeOutboxEvents records WagerTransactionProcessed for every conclusion
 // (including LOSS) or WagerTransactionRejected for a durable rejection, plus
-// WalletBalanceChanged only when a movement actually changed the balance
-// (spec: "WagerTransactionProcessed em toda conclusão, WalletBalanceChanged
-// só com mudança de saldo").
+// WalletBalanceChanged only when a movement actually changed the balance.
 func (uc *ProcessOperationUseCase) writeOutboxEvents(ctx context.Context, repos Repositories, transaction *domainwallet.WagerTransaction, walletValue *domainwallet.Wallet, entry *domainwallet.WalletLedgerEntry, correlationID, causationID string, now time.Time) error {
 	eventID, err := newID()
 	if err != nil {
@@ -880,9 +816,8 @@ func (uc *ProcessOperationUseCase) writeOutboxEvents(ctx context.Context, repos 
 	return nil
 }
 
-// isValidIdempotencyKey enforces the spec's format: "um texto ASCII
-// imprimível de 1 a 255 caracteres" - printable ASCII is 0x20 (space)
-// through 0x7e ('~').
+// isValidIdempotencyKey accepts 1 to 255 printable ASCII characters, 0x20
+// (space) through 0x7e ('~').
 func isValidIdempotencyKey(key string) bool {
 	if len(key) == 0 || len(key) > 255 {
 		return false

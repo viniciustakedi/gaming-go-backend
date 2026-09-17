@@ -1,18 +1,17 @@
 //go:build integration
 
-// Package integration proves the IAM model in alignment.md and spec.md
-// against a real MiniStack: per-role least privilege by action and ARN, an
-// unknown key rejected, an explicit Deny beating an Allow, and redrive to
-// the DLQ after maxReceiveCount.
+// Package integration proves the IAM model against a real MiniStack:
+// per-role least privilege by action and ARN, an unknown key rejected, an
+// explicit Deny beating an Allow, and redrive to the DLQ after
+// maxReceiveCount.
 //
-// No root credentials anywhere in this file, in the application, or
-// anywhere else outside deploy/ministack/provision.sh - "a aplicação e os
-// testes nunca usam as chaves root" (spec.md) applies to this suite too.
-// The two scenarios that are inherently administrative - proving an
-// explicit Deny beats an Allow, and proving redrive to a DLQ after
-// maxReceiveCount - are covered instead with dedicated, disposable IAM test
-// fixtures that provision.sh creates up front, the one place in the whole
-// repository that is allowed to hold MiniStack's root key:
+// No root credentials anywhere in this file, in the application, or anywhere
+// else outside deploy/ministack/provision.sh. The two scenarios that are
+// inherently administrative - proving an explicit Deny beats an Allow, and
+// proving redrive to a DLQ after maxReceiveCount - are covered instead with
+// dedicated, disposable IAM test fixtures that provision.sh creates up
+// front, the one place in the whole repository that is allowed to hold
+// MiniStack's root key:
 //   - "deny-probe": one Allow and one explicit Deny policy, both on
 //     sqs:SendMessage against the same disposable queue
 //     (IAM_TEST_DENY_PROBE_QUEUE_NAME). This test never mutates IAM; it
@@ -221,8 +220,8 @@ func receiveByMarker(ctx context.Context, client *sqs.Client, queueURL, marker s
 }
 
 // TestIAM_AccessScopedByActionAndARN proves each of the four provisioned
-// roles can do only what alignment.md's IAM table grants it - nothing on a
-// queue it was not scoped to, nothing outside its listed actions.
+// roles can do only what the IAM model grants it - nothing on a queue it was
+// not scoped to, nothing outside its listed actions.
 func TestIAM_AccessScopedByActionAndARN(t *testing.T) {
 	rc := loadTestCreds(t)
 	gateway := sqsClient(t, rc.gatewayKey, rc.gatewaySecret)
@@ -259,18 +258,13 @@ func TestIAM_AccessScopedByActionAndARN(t *testing.T) {
 		_, err := consumer.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: aws.String(dlqQueueName())})
 		assertAllowed(t, "consumer GetQueueUrl dlq", err)
 	})
-	// The consumer policy also grants ChangeMessageVisibility and
-	// DeleteMessage on wager-transactions - a previous version of this test
-	// accepted an empty ReceiveMessage result as success, which meant a
-	// regression that never delivered the seeded message would still pass
-	// without ChangeMessageVisibility or DeleteMessage ever running. Seed a
-	// marked message via the gateway, in its own FIFO group so it cannot be
-	// head-of-line blocked by anything else in the queue, retry
-	// ReceiveMessage under a deadline until that exact message shows up
-	// (failing the subtest if it never does), and only then exercise
-	// ChangeMessageVisibility and DeleteMessage: the full receive/change/
-	// delete cycle the policy is meant to allow, proven against the message
-	// this run actually produced.
+	// Accepting an empty ReceiveMessage result as success would let a
+	// regression that never delivers the seeded message pass without
+	// ChangeMessageVisibility or DeleteMessage ever running. So the message is
+	// seeded via the gateway in its own FIFO group, where nothing else in the
+	// queue can head-of-line block it, and ReceiveMessage retries under a
+	// deadline until that exact message shows up before the rest of the
+	// receive/change/delete cycle runs against it.
 	t.Run("consumer can receive, change visibility and delete on input", func(t *testing.T) {
 		marker := uniqueID("co-cycle")
 		group := "consumer-cycle-" + marker
@@ -313,17 +307,12 @@ func TestIAM_AccessScopedByActionAndARN(t *testing.T) {
 		_, err := reader.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(outURL), WaitTimeSeconds: 1})
 		assertAllowed(t, "events-reader ReceiveMessage output", err)
 	})
-	// The events-reader policy also grants DeleteMessage on wallet-events -
-	// the previous version of this test only ever exercised ReceiveMessage,
-	// leaving that half of the policy unverified. It also accepted an empty
-	// ReceiveMessage result as success, which meant a regression that never
-	// delivered the seeded message would still pass without DeleteMessage
-	// ever running. Seed a marked message via the publisher, in its own FIFO
-	// group so it cannot be head-of-line blocked by anything else in the
-	// queue, retry ReceiveMessage under a deadline until that exact message
-	// shows up (failing the subtest if it never does), and only then delete
-	// it: the full receive/delete cycle the policy is meant to allow,
-	// proven against the message this run actually produced.
+	// Accepting an empty ReceiveMessage result as success would let a
+	// regression that never delivers the seeded message pass without
+	// DeleteMessage ever running. So the message is seeded via the publisher
+	// in its own FIFO group, where nothing else in the queue can head-of-line
+	// block it, and ReceiveMessage retries under a deadline until that exact
+	// message shows up before it is deleted.
 	t.Run("events-reader can receive and delete on output", func(t *testing.T) {
 		marker := uniqueID("rd-cycle")
 		group := "reader-cycle-" + marker
@@ -435,9 +424,8 @@ func TestIAM_RedriveToDLQ(t *testing.T) {
 	}
 }
 
-// uniqueID is test/testclient's shared id generator (spec, seam 3: "o mesmo
-// cliente de teste roda em dois harnesses") - test/multiinstance uses the
-// same function.
+// uniqueID is test/testclient's shared id generator - test/multiinstance uses
+// the same function.
 func uniqueID(prefix string) string {
 	return testclient.UniqueID(prefix)
 }

@@ -16,8 +16,7 @@ type OpenWalletInput struct {
 	PlayerID       string
 	InitialBalance money.Money
 	// CorrelationID ties the two outbox events this call may write back to
-	// the HTTP request that caused them (spec: "correlationId vem do
-	// header X-Correlation-Id ou é gerado no HTTP").
+	// the HTTP request that caused them.
 	CorrelationID string
 }
 
@@ -30,19 +29,18 @@ type OpenWalletUseCase struct {
 }
 
 // NewOpenWalletUseCase wires the use case to its unit of work. now defaults
-// to time.Now so production code never has to pass it; tests substitute a
-// fixed clock.
+// to time.Now; tests substitute a fixed clock.
 func NewOpenWalletUseCase(uow UnitOfWork) *OpenWalletUseCase {
 	return &OpenWalletUseCase{uow: uow, now: time.Now}
 }
 
-// Open validates the input, builds the wallet (and, for a positive initial
-// balance, its OPENING transaction, ledger entry and two outbox events)
-// entirely in memory, then persists all of it in a single transaction. A
-// second wallet for the same player and currency - even opened
-// concurrently - fails at the database's own unique constraint, translated
-// here to operation.ErrWalletAlreadyExists; any other write failure is
-// returned unclassified, for the caller to treat as transient.
+// Open builds the wallet (and, for a positive initial balance, its OPENING
+// transaction, ledger entry and two outbox events) in memory, then persists
+// all of it in a single transaction. A second wallet for the same player and
+// currency - even opened concurrently - fails at the database's own unique
+// constraint, translated here to operation.ErrWalletAlreadyExists; any other
+// write failure is returned unclassified, for the caller to treat as
+// transient.
 func (uc *OpenWalletUseCase) Open(ctx context.Context, input OpenWalletInput) (*domainwallet.Wallet, error) {
 	currency, err := input.InitialBalance.Currency()
 	if err != nil {
@@ -60,9 +58,8 @@ func (uc *OpenWalletUseCase) Open(ctx context.Context, input OpenWalletInput) (*
 	if err != nil {
 		return nil, ClassifyMoneyError(err)
 	}
-	// Parse never lets a negative amount reach here (no minus sign in the
-	// canonical external format), but Compare's contract still has to be
-	// checked, and Open below re-validates non-negativity independently.
+	// Parse never lets a negative amount reach here, but Compare's contract
+	// still has to be checked; Open below re-validates non-negativity anyway.
 	comparison, err := input.InitialBalance.Compare(zero)
 	if err != nil {
 		return nil, ClassifyMoneyError(err)

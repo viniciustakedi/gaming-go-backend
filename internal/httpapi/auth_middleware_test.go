@@ -172,12 +172,10 @@ func TestRequireRole_NoIdentityInContext_Returns401(t *testing.T) {
 	}
 }
 
-// TestRequireRole_ProviderWithoutProviderID_Returns403 proves ticket 07's
-// own requirement directly: "Provedor sem provider_id devolve 403" - a
-// token that verifies fine but carries the provider role with no
-// provider_id claim is forbidden, not unauthorized. No fixture in the real
-// Keycloak realm produces this shape (every provider client there does
-// carry provider_id), so this scenario is only reachable through a fake
+// TestRequireRole_ProviderWithoutProviderID_Returns403 pins that a token which
+// verifies fine but carries the provider role with no provider_id claim is
+// forbidden, not unauthorized. Every provider client in the real Keycloak realm
+// does carry provider_id, so this shape is only reachable through a fake
 // identity.
 func TestRequireRole_ProviderWithoutProviderID_Returns403(t *testing.T) {
 	handler := requireRole(auth.RoleWalletAdmin, func(w http.ResponseWriter, r *http.Request) {
@@ -266,12 +264,11 @@ func TestRequireAnyRole_NeitherRole_Returns403(t *testing.T) {
 	assertErrorCode(t, rec.Body.Bytes(), codeForbidden)
 }
 
-// TestRequireAnyRole_BothRoles_ProviderIDIrrelevant proves the precedence
-// fix (review finding: a token with both provider and wallet-admin, and no
-// provider_id, was rejected as forbidden before role selection even ran,
-// while the same token with a provider_id became an admin). wallet-admin
-// now wins outright whenever the route accepts it, so provider_id is never
-// asked of a caller who already clears the route as admin.
+// TestRequireAnyRole_BothRoles_ProviderIDIrrelevant pins the precedence rule:
+// wallet-admin wins outright whenever the route accepts it, so provider_id is
+// never asked of a caller who already clears the route as admin. Without this,
+// the same pair of roles resolves differently depending on whether provider_id
+// happened to be set.
 func TestRequireAnyRole_BothRoles_ProviderIDIrrelevant(t *testing.T) {
 	roles := []string{auth.RoleProvider, auth.RoleWalletAdmin}
 	cases := []struct {

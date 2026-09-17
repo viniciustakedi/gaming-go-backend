@@ -21,12 +21,11 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
-// appHarness is the reusable seam 3a fixture the spec asks ticket 06 to
-// establish: the whole Fx application, started via fxtest on an
-// OS-assigned port against the real Postgres and MiniStack this package
-// already talks to for seam 2. Every later ticket that adds an HTTP
-// endpoint should extend this harness and its do() client rather than
-// build its own ad hoc fxtest wiring.
+// appHarness is this package's shared fixture: the whole Fx application,
+// started via fxtest on an OS-assigned port against the real Postgres and
+// MiniStack the schema tests already talk to. A new HTTP endpoint extends
+// this harness and its do() client rather than building its own ad hoc
+// fxtest wiring.
 type appHarness struct {
 	baseURL    string
 	client     *http.Client
@@ -44,11 +43,10 @@ type appHarness struct {
 // the transient-failure scenario) must t.Setenv it before calling this,
 // since every harness gets its own pool.
 //
-// It also fetches a real wallet-admin token from Keycloak up front: every
-// ticket-06 wallet test in this package predates ticket 07's auth
-// requirement and calls do() without ever mentioning a token, so do() below
-// applies this one by default unless a call explicitly sets (or blanks out)
-// its own Authorization header - see do()'s doc comment.
+// It also fetches a real wallet-admin token from Keycloak up front: most
+// wallet tests in this package call do() without ever mentioning a token, so
+// do() below applies this one by default unless a call explicitly sets (or
+// blanks out) its own Authorization header - see do()'s doc comment.
 func newAppHarness(t *testing.T) *appHarness {
 	t.Helper()
 	setAppEnv(t)
@@ -96,8 +94,8 @@ func (h *appHarness) stop(t *testing.T, ctx context.Context) error {
 // nil for a bodyless request.
 //
 // Every request carries h.adminToken as "Authorization: Bearer <token>" by
-// default, since every /wallets* route now requires wallet-admin (ticket
-// 07). A caller proving a specific auth scenario overrides this the same
+// default, since every /wallets* route requires wallet-admin. A caller
+// proving a specific auth scenario overrides this the same
 // way it overrides any other header: pass "Authorization" in headers - an
 // empty value removes the header entirely (the "missing token" scenario), a
 // non-empty one replaces it (a different role's token, a tampered token, an

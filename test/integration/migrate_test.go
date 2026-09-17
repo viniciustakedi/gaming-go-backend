@@ -15,8 +15,7 @@ import (
 
 // TestMigrations_UpDownUp proves the full migration chain - roles, wallets,
 // wager_transactions, the ledger, inbox and outbox - reverses cleanly and
-// reapplies cleanly, per the spec ("Todas as migrations sobem, descem e
-// sobem de novo").
+// reapplies cleanly.
 //
 // It runs against the same database every other test in this package
 // uses, tearing every wallet-related table down and rebuilding it midway
@@ -55,8 +54,8 @@ func TestMigrations_UpDownUp(t *testing.T) {
 
 // assertWalletAppCanInsertWallet proves wallet_app authenticates with its
 // provisioned password and can write through the grants the down/up cycle
-// just reapplied - the same INSERT any other seam-2 schema test in this
-// package relies on wallet_app being able to perform.
+// just reapplied - the same INSERT every other schema test in this package
+// relies on wallet_app being able to perform.
 func assertWalletAppCanInsertWallet(t *testing.T, ctx context.Context) {
 	t.Helper()
 	conn := connectApp(t, ctx)
@@ -69,8 +68,8 @@ func assertWalletAppCanInsertWallet(t *testing.T, ctx context.Context) {
 
 // TestMigrations_UpFailsWhenRoleMissing proves migrations/0002_app_role.up.sql
 // refuses to run, with a clear message, against a Postgres where the
-// wallet_app role does not exist yet - the failure mode this ticket
-// requires instead of the migration silently creating the role itself.
+// wallet_app role does not exist yet, instead of silently creating the role
+// itself.
 //
 // wallet_app is a cluster-wide role (see migrations/0002_app_role.up.sql),
 // so a disposable database on its own cannot make it "not exist" - every

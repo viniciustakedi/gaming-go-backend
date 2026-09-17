@@ -1,6 +1,6 @@
-// Package httpapi wires the HTTP server: health checks, metrics and, from
-// later tickets, the wagering and wallet routes. It owns the process's
-// notion of readiness and is the first component to react to shutdown.
+// Package httpapi wires the HTTP server: health checks, metrics, and the
+// wagering and wallet routes. It owns the process's notion of readiness and
+// is the first component to react to shutdown.
 package httpapi
 
 import (
@@ -24,19 +24,16 @@ import (
 
 // ReadinessChecks is an fx.In struct that collects every Check contributed
 // to the "readiness" value group. Postgres and SQS each add their own
-// (internal/pg, internal/queue) without this package importing either -
-// the group is the only coupling between them.
+// without this package importing either - the group is the only coupling.
 type ReadinessChecks struct {
 	fx.In
 	Checks []health.Named `group:"readiness"`
 }
 
-// Server bundles the listener and *http.Server so callers - notably the
-// fxtest composition test - can read back the actual bound address, which
-// matters when HTTP_ADDR is "127.0.0.1:0". Listener is nil until the
-// OnStart hook below binds it: New only builds the mux and does no I/O, so a
-// later hook failing (Postgres, SQS) during the same Start() call means this
-// hook never runs and the port is never touched at all - see RegisterLifecycle.
+// Server bundles the listener and *http.Server so callers can read back the
+// actual bound address, which matters when HTTP_ADDR is "127.0.0.1:0".
+// Listener is nil until the OnStart hook binds it: New only builds the mux
+// and does no I/O - see RegisterLifecycle.
 type Server struct {
 	Listener  net.Listener
 	HTTP      *http.Server
@@ -57,14 +54,12 @@ func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessCheck
 	reconciliationMetrics := newReconciliationMetrics(registry)
 
 	// Every /wallets* route requires the wallet-admin realm role, and
-	// POST /wagering/transactions requires provider, both checked by
-	// requireRole once the mux has matched a route. The two read routes
-	// below accept either role (requireAnyRole): a provider sees only its
-	// own transactions and a wallet-admin sees every one, a distinction the
-	// route alone cannot express, so GetTransactionUseCase applies it once
-	// the caller's role and identity are known (spec, decision 7: "GET
-	// /wagering/transactions/:id ... wallet-admin vê todas"). /health/* and
-	// /metrics stay unauthenticated (spec, decision 7).
+	// POST /wagering/transactions requires provider, both checked once the
+	// mux has matched a route. The two read routes below accept either role:
+	// a provider sees only its own transactions and a wallet-admin sees
+	// every one, a distinction the route alone cannot express, so
+	// GetTransactionUseCase applies it once the caller's role and identity
+	// are known. /health/* and /metrics stay unauthenticated.
 	providerOrAdmin := []string{auth.RoleProvider, auth.RoleWalletAdmin}
 	mux := http.NewServeMux()
 	mux.Handle("GET /health/live", liveHandler())
@@ -83,9 +78,7 @@ func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessCheck
 			// authenticate wraps the whole mux, not just its matched routes,
 			// so a business-namespace request the mux itself would answer
 			// with a public 404/405 (an unmapped method, a typo'd path)
-			// still requires a valid token first (ticket 07 review: "PUT
-			// /wallets sem token recebe o 405 público do mux, em vez de
-			// 401").
+			// still requires a valid token first.
 			Handler:      authenticate(verifier, isPublicRoute, mux),
 			ReadTimeout:  cfg.HTTP.ReadTimeout,
 			WriteTimeout: cfg.HTTP.WriteTimeout,
@@ -96,12 +89,8 @@ func New(cfg config.Config, registry *prometheus.Registry, checks ReadinessCheck
 }
 
 // isPublicRoute reports whether r's path is exempt from authentication:
-// health checks and metrics (spec, decision 7: "/health/* é público. /metrics
-// é público"). Everything else - today just /wallets*, and later /wagering*
-// and /providers* without any change to this function (ticket 07: "o
-// desenho deve acomodar /wagering e /providers sem mudança estrutural") - is
-// business namespace and default-denied by authenticate until proven public
-// here.
+// health checks and metrics. Everything else is business namespace and
+// default-denied by authenticate until proven public here.
 func isPublicRoute(r *http.Request) bool {
 	if r.URL.Path == "/metrics" {
 		return true
@@ -109,21 +98,15 @@ func isPublicRoute(r *http.Request) bool {
 	return strings.HasPrefix(r.URL.Path, "/health/")
 }
 
-// RegisterLifecycle binds the listener and starts serving in a background
-// goroutine on start, and, on stop, enforces the exact ordering the spec
-// requires: readiness fails first, so the shutdown is visible to the
-// orchestrator immediately, and only then does Shutdown stop accepting new
-// connections and drain the ones already in flight, bounded by
-// HTTP_SHUTDOWN_TIMEOUT.
+// RegisterLifecycle binds the listener and serves in a background goroutine
+// on start. On stop it fails readiness first, so the shutdown is visible to
+// the orchestrator before Shutdown stops accepting new connections and
+// drains the ones in flight, bounded by HTTP_SHUTDOWN_TIMEOUT.
 //
-// The listener is opened here, in OnStart, rather than in New. If it were
-// opened in the constructor, it would be bound as soon as the Fx object
-// graph is built - before any lifecycle hook runs - so a later hook failing
-// (Postgres ping, SQS resolution) would abort Start() without this hook's
-// OnStop ever having been registered as "started", leaving the port bound
-// for the rest of the process's life. Binding it here means the port is
-// only ever touched once this hook's own turn to start has come, so an
-// earlier hook's failure leaves it untouched and free for a retry.
+// The listener is opened here, in OnStart, rather than in New: binding it in
+// the constructor would leave the port bound for the rest of the process's
+// life whenever a later hook (Postgres ping, SQS resolution) aborts Start()
+// before this hook's OnStop was registered as "started".
 func RegisterLifecycle(lc fx.Lifecycle, s *Server, cfg config.Config, logger *slog.Logger) {
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {

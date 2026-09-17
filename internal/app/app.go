@@ -22,10 +22,9 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletpg"
 )
 
-// Modules lists every Fx module the service composes, in the order a human
-// reads as "config and logging first, dependencies next, the server last".
-// The actual start order is decided by Fx from the dependency graph, not
-// from this slice's order.
+// Modules lists every Fx module the service composes, ordered for a human
+// reader. The actual start order is decided by Fx from the dependency graph,
+// not from this slice's order.
 var Modules = fx.Options(
 	config.Module,
 	logging.Module,

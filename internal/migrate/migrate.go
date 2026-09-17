@@ -1,7 +1,5 @@
 // Package migrate wraps golang-migrate so the `migrate` subcommand and the
-// one-shot Compose migrations service share the exact same up/down logic
-// the rest of the service would use if it ever needed to run migrations
-// programmatically.
+// one-shot Compose migrations service share the exact same up/down logic.
 package migrate
 
 import (
@@ -14,9 +12,7 @@ import (
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	// Registered for its side effect: it makes database/sql aware of the
 	// "pgx" driver name, so sql.Open below uses pgx's own stdlib adapter
-	// instead of pulling in lib/pq - the same pgx we already depend on for
-	// the pool internal/pg manages, just a second, short-lived connection
-	// that closeMigrator releases as soon as the migration run finishes.
+	// instead of pulling in lib/pq.
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/viniciustakedi/jungle-gaming-wallet/migrations"

@@ -1,13 +1,11 @@
 //go:build integration
 
-// This file proves seam 2 from the spec: with the migrations from this
-// ticket applied, every financial invariant listed under "Schema e
-// proteção no banco" and "Testing Decisions" holds at the database level,
-// enforced against wallet_app - the same least-privilege role the running
-// service connects as - not against the migration owner. A few scenarios
-// (see the "TriggerBlocks...EvenForOwner" tests) deliberately use the
-// owner role instead, to prove a trigger holds independently of grants,
-// not because of them.
+// This file proves every financial invariant holds at the database level
+// with the migrations applied, enforced against wallet_app - the same
+// least-privilege role the running service connects as - not against the
+// migration owner. A few scenarios (see the "TriggerBlocks...EvenForOwner"
+// tests) deliberately use the owner role instead, to prove a trigger holds
+// independently of grants, not because of them.
 package integration
 
 import (
@@ -233,10 +231,9 @@ func TestWagerTransactions_RejectedSecondReversalSucceeds(t *testing.T) {
 }
 
 // TestWagerTransactions_PendingStatusFails proves PENDING - the in-memory
-// only state before a transaction's first INSERT (spec: "processamento
-// síncrono") - can never be persisted. The only non-terminal status a raw
-// INSERT may create is PENDING_REFERENCE; nothing selects a stray PENDING
-// row, so it would sit forever unresolved.
+// only state before a transaction's first INSERT - can never be persisted.
+// The only non-terminal status a raw INSERT may create is PENDING_REFERENCE;
+// nothing selects a stray PENDING row, so it would sit forever unresolved.
 func TestWagerTransactions_PendingStatusFails(t *testing.T) {
 	ctx := context.Background()
 	conn := connectApp(t, ctx)
@@ -360,11 +357,11 @@ func TestWagerTransactions_AmountByKindCheck(t *testing.T) {
 	}
 }
 
-// TestWagerTransactions_OpeningAmountByKindCheck proves OPENING follows
-// the same amount-by-kind policy as every other credit: strictly positive.
-// The spec's own note that a zero initial balance never creates an OPENING
-// row at all is a domain-level choice; this constraint is the schema's
-// defense in depth against a raw SQL OPENING of zero.
+// TestWagerTransactions_OpeningAmountByKindCheck proves OPENING follows the
+// same amount-by-kind policy as every other credit: strictly positive. That a
+// zero initial balance never creates an OPENING row at all is a domain-level
+// choice; this constraint is the schema's defense in depth against a raw SQL
+// OPENING of zero.
 func TestWagerTransactions_OpeningAmountByKindCheck(t *testing.T) {
 	ctx := context.Background()
 

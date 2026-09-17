@@ -9,13 +9,12 @@ import (
 	"time"
 )
 
-// seam 3a - internal/httpapi's auth middleware (requireRole,
+// internal/httpapi's auth middleware (requireRole,
 // internal/httpapi/auth_middleware.go) backed by internal/auth's real OIDC
 // verifier against a real Keycloak (docker-compose.yml's keycloak service,
-// deploy/keycloak/realm-wallet.json). Every scenario here proves the ticket
-// 07 contract end to end: no token, an invalid signature or an expired
-// token all answer 401; the right role missing (no realm role at all, or
-// the provider role instead of wallet-admin) answers 403; none of the
+// deploy/keycloak/realm-wallet.json). No token, an invalid signature or an
+// expired token all answer 401; the right role missing (no realm role at all,
+// or the provider role instead of wallet-admin) answers 403; none of the
 // rejected calls ever create a wallet.
 
 func requireNoWalletCreated(t *testing.T, ctx context.Context, h *appHarness, playerID string) {
@@ -59,8 +58,7 @@ func TestAuth_InvalidSignature_Returns401AndCreatesNothing(t *testing.T) {
 
 // TestAuth_ExpiredToken_Returns401AndCreatesNothing uses
 // provider-a-short-lived, the realm client provisioned with a 2-second
-// access token lifespan specifically for this scenario (spec, decision 7:
-// "um client de provedor com token de vida curta"). It sleeps past both
+// access token lifespan specifically for this scenario. It sleeps past both
 // that lifespan and the verifier's own clock-skew tolerance
 // (AUTH_CLOCK_SKEW, 5s by default - internal/config) before calling the
 // API, so the token is expired well outside the tolerance the app is
@@ -120,8 +118,7 @@ func TestAuth_ProviderRoleOnWallets_Returns403AndCreatesNothing(t *testing.T) {
 // TestAuth_ProviderRoleOnGetWallet_Returns403 proves the same wallet-admin
 // restriction on the read side, against a wallet that genuinely exists -
 // distinguishing "forbidden" from "not found" matters here, since a wrong
-// implementation could accidentally leak existence through a 404 instead of
-// a uniform 403 (spec: "sem ... vazamento de dados").
+// implementation could leak existence through a 404 instead of a uniform 403.
 func TestAuth_ProviderRoleOnGetWallet_Returns403(t *testing.T) {
 	h := newAppHarness(t)
 	playerID := newUUID(t)

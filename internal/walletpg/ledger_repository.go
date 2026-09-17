@@ -16,7 +16,6 @@ import (
 
 type ledgerRepository struct{ q pg.Querier }
 
-// newLedgerRepository builds the pgx-backed LedgerRepository bound to q.
 func newLedgerRepository(q pg.Querier) walletapp.LedgerRepository {
 	return &ledgerRepository{q: q}
 }
@@ -28,9 +27,9 @@ func newLedgerAuditRepository(pool *pgxpool.Pool) walletapp.LedgerAuditRepositor
 }
 
 func (r *ledgerAuditRepository) List(ctx context.Context, walletID string, afterSequence int64, limit int) (walletapp.LedgerPage, error) {
-	// Fetch limit + 1 rows to detect a next page; when the extra row exists,
-	// nextCursor is the last returned sequence. Strict sequence order and the >
-	// cursor prevent ledger entries from being skipped or repeated across pages.
+	// Fetch limit + 1 rows to detect a next page. Strict sequence order and
+	// the > cursor prevent ledger entries from being skipped or repeated
+	// across pages.
 	rows, err := r.pool.Query(ctx, `
 		SELECT sequence_number, transaction_id, direction, amount, currency, balance_before, balance_after, occurred_at
 		FROM wallet_ledger_entries

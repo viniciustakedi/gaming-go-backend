@@ -1,10 +1,8 @@
 // Package queue owns the SQS clients the application uses at runtime. It
-// deliberately never touches MiniStack's root credentials: it builds one
-// client per IAM role the application actually plays (consumer, publisher),
-// each signed with that role's own access key, so every request this
-// process sends is both least-privilege and SigV4-signed. Unsigned or root
-// requests bypass every MiniStack policy - see alignment.md - so this
-// package is the one place that must never take a shortcut.
+// never touches MiniStack's root credentials: it builds one client per IAM
+// role the application plays (consumer, publisher), each signed with that
+// role's own key, because unsigned or root requests bypass every MiniStack
+// policy.
 package queue
 
 import (
@@ -24,10 +22,8 @@ import (
 )
 
 // Queues holds the role-scoped clients and the queue URLs resolved from
-// them at start. InputURL and OutputURL are empty until the OnStart hook
-// below fills them in; nothing reads them before that hook runs, because
-// the HTTP server (and every future consumer) depends on this component
-// starting first.
+// them at start. The URLs stay empty until the OnStart hook below fills
+// them in; every component that reads them depends on this one starting.
 type Queues struct {
 	Consumer  *sqs.Client
 	Publisher *sqs.Client
@@ -42,10 +38,9 @@ type Queues struct {
 }
 
 // New builds the consumer and publisher clients. It never falls back to
-// ambient AWS credentials (instance profile, shared config file, env
-// AWS_ACCESS_KEY_ID): each client is pinned to the exact role credentials
+// ambient AWS credentials: each client is pinned to the role credentials
 // config.Load validated, so a misconfigured environment fails loudly
-// instead of silently picking up whatever credentials happen to be around.
+// instead of picking up whatever credentials happen to be around.
 func New(cfg config.Config) (*Queues, error) {
 	consumer, err := newRoleClient(cfg.SQS, cfg.SQS.ConsumerAccessKeyID, cfg.SQS.ConsumerSecretAccessKey)
 	if err != nil {
@@ -78,13 +73,11 @@ func newRoleClient(sqsCfg config.SQSConfig, accessKeyID, secretAccessKey string)
 	}), nil
 }
 
-// RegisterLifecycle resolves the input, output and DLQ queue URLs on start,
-// within the configured timeout. GetQueueUrl also doubles as the
-// reachability and IAM probe: an unreachable MiniStack or a denied
-// principal fails start here, before the process ever claims to be ready.
+// RegisterLifecycle resolves the input, output and DLQ queue URLs on start.
+// GetQueueUrl doubles as the reachability and IAM probe: an unreachable
+// MiniStack or a denied principal fails start before the process is ready.
 // The DLQ is resolved by the consumer client, the same role that later
-// sends the permanent-failure envelope to it - see provision.sh, which
-// grants that role sqs:GetQueueUrl on the DLQ ARN for exactly this.
+// sends the permanent-failure envelope to it.
 func RegisterLifecycle(lc fx.Lifecycle, q *Queues, cfg config.Config, logger *slog.Logger) {
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {

@@ -18,11 +18,9 @@ import (
 // This file holds only what test/testclient's shared SQS helpers cannot: the
 // two credential roles this package's scenarios authenticate as directly
 // (gateway, events-reader) and the FIFO envelope/reading calls built on top
-// of them (spec, seam 3: "o mesmo cliente de teste roda em dois harnesses").
-// The SQS client, queue URL/naming and envelope-building logic itself lives
-// in test/testclient and is shared with test/integration's own SQS helpers
-// (iam_test.go, sqs_consumer_test.go) - see this ticket's Comments for the
-// extraction.
+// of them. The SQS client, queue URL/naming and envelope-building logic
+// itself lives in test/testclient and is shared with test/integration's own
+// SQS helpers (iam_test.go, sqs_consumer_test.go).
 
 // sqsTestCreds holds only the two roles this package's scenarios need to
 // authenticate as directly: gateway, to publish wager requests the way a
@@ -91,7 +89,7 @@ func sendWagerMessage(t *testing.T, client *sqs.Client, group, dedup string, bod
 // eventId observed mapped to how many times it was delivered - the
 // independent count a dedup-by-eventId assertion needs, since a republished
 // event can legitimately arrive more than once outside the FIFO's five
-// minute deduplication window (spec, "Outbox e eventos").
+// minute deduplication window.
 func drainOutputEvents(t *testing.T, deadline time.Time, want map[string]bool) map[string]int {
 	t.Helper()
 	creds := loadSQSTestCreds(t)

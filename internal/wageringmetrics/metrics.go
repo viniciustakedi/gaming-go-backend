@@ -1,8 +1,7 @@
 // Package wageringmetrics is the Prometheus-backed adapter for
 // walletapp.OperationMetrics - the one place that turns the shared
 // processing use case's observability signals into actual collectors,
-// keeping internal/walletapp itself free of a concrete metrics library
-// (spec: "Camadas").
+// keeping internal/walletapp itself free of a concrete metrics library.
 package wageringmetrics
 
 import (
@@ -20,10 +19,7 @@ type metrics struct {
 	latency    *prometheus.HistogramVec
 }
 
-// New registers and returns the wagering collectors on registry (spec,
-// Observability: "operações por canal, tipo e estado; duplicatas por canal;
-// ... conflitos de concorrência ... histograma de latência de
-// processamento").
+// New registers and returns the wagering collectors on registry.
 func New(registry *prometheus.Registry) walletapp.OperationMetrics {
 	m := &metrics{
 		operations: prometheus.NewCounterVec(prometheus.CounterOpts{

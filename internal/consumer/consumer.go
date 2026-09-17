@@ -104,10 +104,9 @@ func (c *Consumer) stop(ctx context.Context) error {
 		// until its visibility has been reset, so shutdown never races a final
 		// untrack against the handoff back to SQS.
 		c.releaseActive(drainCtx)
-		// The Fx context can expire at exactly the moment work is cancelled.
-		// Keep the dependency barrier until this same bounded drain window ends:
-		// config validates it fits in FX_STOP_TIMEOUT, and returning before done
-		// would let Fx close pgx or SQS under a worker still unwinding.
+		// Returning before done would let Fx close pgx or SQS under a worker
+		// still unwinding, so hold the barrier until this bounded drain ends;
+		// config validates it fits in FX_STOP_TIMEOUT.
 		select {
 		case <-done:
 			return fmt.Errorf("consumer: stop: %w", wait.Err())
@@ -133,12 +132,11 @@ func (c *Consumer) run(receiveCtx, workCtx context.Context) {
 		if shutdownPollBudget := c.cfg.ShutdownTimeout - config.SQSConsumerPostCancelDrain; shutdownPollBudget > 0 && pollWait > shutdownPollBudget {
 			pollWait = shutdownPollBudget
 		}
-		// Do not cancel the HTTP request with receiveCtx. Some SQS-compatible
-		// servers can finish a cancelled long poll and hide its messages after
-		// the client has discarded the response. Let this bounded request return
-		// so the cancellation check below can explicitly release that batch. The
-		// configured poll wait is a ceiling: reserve the post-cancel drain so a
-		// stop never needs to abandon an in-flight request to meet its deadline.
+		// Do not cancel this request with receiveCtx. Some SQS-compatible
+		// servers finish a cancelled long poll and hide its messages after the
+		// client has discarded the response; let the bounded request return so
+		// the check below can release that batch. The poll wait reserves the
+		// post-cancel drain so a stop never abandons an in-flight request.
 		pollCtx, cancelPoll := context.WithTimeout(context.Background(), pollWait+time.Second)
 		output, err := c.queues.Consumer.ReceiveMessage(pollCtx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(c.queues.InputURL), MaxNumberOfMessages: 10, WaitTimeSeconds: int32(seconds(pollWait)), VisibilityTimeout: int32(seconds(c.cfg.VisibilityTimeout)), MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameAll}})
 		cancelPoll()
@@ -223,29 +221,21 @@ func (c *Consumer) handle(parent context.Context, message types.Message) {
 		return
 	}
 	if duplicate {
-		// This metric counts an SQS delivery replay identified by the inbox
-		// (same messageId and payload hash), not a domain-operation replay.
-		// The latter is recorded below through RecordOutcome with channel SQS.
+		// Counts an SQS delivery replay identified by the inbox (same
+		// messageId and payload hash), not a domain-operation replay.
 		c.metrics.duplicates.Inc()
 	} else {
 		c.useCase.RecordOutcome(walletapp.ChannelSQS, result, nil, time.Since(started))
-		// The "after commit of PENDING_REFERENCE" fault point (spec, "Injeção
-		// de falhas e ambiente") fires only for a freshly committed pending
-		// row, not a replay of one already persisted: processOnce's
-		// transaction already committed by the time process returns here, so
-		// this is genuinely post-commit, not a substitute for a trigger
-		// placed before it. An idempotent replay's own transaction only ever
-		// commits the inbox row, never a new PENDING_REFERENCE, exactly like
-		// the HTTP path (walletapp.Process) already guards.
+		// Fires only for a freshly committed PENDING_REFERENCE row, never for
+		// a replay: an idempotent replay's transaction commits only the inbox
+		// row, never a new PENDING_REFERENCE.
 		if result.Status == domainwallet.PendingReference && !result.IdempotentReplay {
 			faultinject.Trigger("after-pending-reference-commit")
 		}
 	}
 	fields.transactionID = result.TransactionID
-	// The "after commit and before DeleteMessage" fault point (spec, "Injeção
-	// de falhas e ambiente") fires here: the inbox row and the wallet effect
-	// (or the duplicate's own commit) are already durable, only the SQS
-	// delete is still pending.
+	// The inbox row and the wallet effect are already durable here; only the
+	// SQS delete is still pending.
 	faultinject.Trigger("after-commit-before-delete")
 	if err := c.delete(parent, message); err != nil {
 		c.logger.Error("sqs delete after commit failed", "error", err, "messageId", fields.messageID, "transactionId", fields.transactionID, "walletId", fields.walletID, "providerId", fields.providerID)
@@ -286,11 +276,9 @@ func (c *Consumer) processOnce(ctx context.Context, messageID string, prepared w
 		if hash != prepared.Hash() {
 			return walletapp.ProcessOperationResult{}, false, false, errInboxHashMismatch
 		}
-		// The "before commit" fault point (spec, "Injeção de falhas e
-		// ambiente") fires here too: a duplicate delivery commits nothing new
-		// besides the already-matching inbox row, but it is still a commit a
-		// crash can interrupt, leaving the redelivery to reprocess exactly
-		// once more.
+		// A duplicate delivery commits nothing beyond the already-matching
+		// inbox row, but a crash here still leaves redelivery to reprocess
+		// exactly once more.
 		faultinject.Trigger("before-commit")
 		if err := tx.Commit(ctx); err != nil {
 			return walletapp.ProcessOperationResult{}, false, false, err
@@ -307,10 +295,8 @@ func (c *Consumer) processOnce(ctx context.Context, messageID string, prepared w
 	if _, err := tx.Exec(ctx, `UPDATE inbox_messages SET completed_at = now() WHERE consumer_name = $1 AND message_id = $2`, consumerName, messageID); err != nil {
 		return walletapp.ProcessOperationResult{}, false, false, err
 	}
-	// The "before commit" fault point (spec, "Injeção de falhas e ambiente"):
-	// killing the process here leaves the whole transaction - inbox insert
-	// and wallet effect alike - rolled back by Postgres when the connection
-	// drops, so redelivery finds nothing persisted and processes once.
+	// A crash here rolls back the inbox insert and the wallet effect alike,
+	// so redelivery finds nothing persisted and processes exactly once.
 	faultinject.Trigger("before-commit")
 	if err := tx.Commit(ctx); err != nil {
 		return walletapp.ProcessOperationResult{}, false, false, err

@@ -159,16 +159,13 @@ func (w *Worker) ProcessBatch(ctx context.Context) error {
 }
 
 // isTransient classifies by an explicit permanent list: only persisted data
-// that cannot be rehydrated is terminal. Connection, serialization, deadlock,
-// lock and statement cancellation, and restart/unavailable (57P01-57P03)
-// errors, like any other infrastructure failure, are retried.
+// that cannot be rehydrated is terminal. Every other database or
+// infrastructure failure is retried, so a transient outage cannot turn an
+// otherwise valid operation into FAILED.
 func isTransient(err error) bool {
 	return !errors.Is(err, walletapp.ErrInvalidPersistedTransaction) && !errors.Is(err, walletapp.ErrCorruptedResultingBalance)
 }
 
-// Only irrecoverable persisted-data failures are terminal. Every other
-// database or infrastructure failure is retried so a transient outage cannot
-// turn an otherwise valid operation into FAILED.
 func isPermanent(err error) bool { return !isTransient(err) }
 
 func (w *Worker) refreshMetrics(ctx context.Context) {
@@ -180,9 +177,8 @@ func (w *Worker) refreshMetrics(ctx context.Context) {
 	w.metrics.pending.Set(float64(pending))
 }
 
-// jitter adds a random [0, delay/2] interval to the exponential delay. The
-// injected source lets tests use fixed endpoints while production spreads rows
-// claimed in the same batch.
+// jitter adds a random [0, delay/2] interval so rows claimed in the same
+// batch spread out; the injected source lets tests use fixed endpoints.
 func jitter(delay time.Duration, random func(int64) int64) time.Duration {
 	if delay <= 0 {
 		return delay

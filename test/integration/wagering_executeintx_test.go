@@ -16,10 +16,8 @@ import (
 
 // explodingUnitOfWork fails the test the instant WithinTx is called. Wiring
 // ProcessOperationUseCase to it and driving ExecuteInTx directly proves
-// ExecuteInTx never opens a transaction of its own - the shape ticket 13's
-// SQS consumer needs, binding ExecuteInTx to its own inbox transaction
-// instead (ticket 08 review, correctness/spec: "o caso de uso não pode
-// participar da transação externa").
+// ExecuteInTx never opens a transaction of its own - the shape the SQS
+// consumer needs, binding ExecuteInTx to its own inbox transaction instead.
 type explodingUnitOfWork struct{ t *testing.T }
 
 func (u explodingUnitOfWork) WithinTx(context.Context, func(context.Context, walletapp.Repositories) error) error {
@@ -41,12 +39,10 @@ func (noopOperationMetrics) ObserveConcurrencyConflict()                        
 // binds ExecuteInTx to a transaction this test itself opens and rolls back
 // - never the UnitOfWork the HTTP handler uses - and checks nothing it
 // wrote (wallet balance/version, the wager transaction, the ledger entry,
-// the outbox records) survives that rollback. This is exactly the
-// composition ticket 13's SQS consumer needs: ExecuteInTx bound to the same
-// transaction the inbox row commits in, so a failure before that
-// transaction's own commit can never leave the wager movement committed
-// without the inbox record (ticket 08 review, correctness/spec: "o caso de
-// uso não pode participar da transação externa").
+// the outbox records) survives that rollback. This is the composition the SQS
+// consumer needs: ExecuteInTx bound to the same transaction the inbox row
+// commits in, so a failure before that transaction's own commit can never
+// leave the wager movement committed without the inbox record.
 func TestProcessOperationExecuteInTx_ExternalTransactionRollback_PersistsNothing(t *testing.T) {
 	h := newAppHarness(t)
 	ctx := context.Background()

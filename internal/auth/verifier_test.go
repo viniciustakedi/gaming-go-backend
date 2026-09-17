@@ -216,11 +216,10 @@ func TestVerify_ExpiredWithinClockSkew_Accepted(t *testing.T) {
 	}
 }
 
-// fixedClockAt overrides v's injectable clock (see OIDCVerifier.clock) with
-// a fixed instant, so validateTimes's boundary arithmetic (exp/nbf plus the
-// configured tolerance) can be checked against hand-computed values instead
-// of a real, jittery wall clock (ticket 07 review: "testes unitários com
-// valores escritos à mão").
+// fixedClockAt overrides v's injectable clock with a fixed instant, so
+// validateTimes's boundary arithmetic (exp/nbf plus the configured tolerance)
+// can be checked against hand-computed values rather than a jittery wall
+// clock.
 func fixedClockAt(v *OIDCVerifier, now time.Time) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -255,13 +254,11 @@ func TestVerify_ExpiredWithinTolerance_Accepted(t *testing.T) {
 	}
 }
 
-// TestVerify_NbfFutureOutsideTolerance_Rejected proves the fix for the
-// review's exact scenario: go-oidc's own nbf check hardcodes a 5-minute
-// leeway, so a genuine RS256 token with nbf 4 minutes in the future used to
-// reach Verify with go-oidc's internal Now already shifted back by the
-// configured (5s) tolerance and still pass. validateTimes replaces that
-// check entirely (RegisterLifecycle sets SkipExpiryCheck: true), so this
-// must now be rejected.
+// TestVerify_NbfFutureOutsideTolerance_Rejected guards the reason validateTimes
+// exists: go-oidc's own nbf check hardcodes a 5-minute leeway, so a genuine
+// RS256 token with nbf 4 minutes in the future would pass it even under a 5s
+// configured tolerance. validateTimes replaces that check entirely
+// (RegisterLifecycle sets SkipExpiryCheck: true), so this must be rejected.
 func TestVerify_NbfFutureOutsideTolerance_Rejected(t *testing.T) {
 	provider := newFakeOIDCProvider(t)
 	v := startVerifier(t, provider, "wallet-api", 5*time.Second)

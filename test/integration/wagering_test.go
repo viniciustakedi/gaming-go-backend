@@ -18,19 +18,14 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
-// seam 3a - internal/httpapi's real HTTP contract for
-// POST /wagering/transactions (ticket 08), driven through appHarness against
-// the same Postgres, Keycloak and MiniStack every other test in this package
-// uses. BET, WIN (with and without a reference), LOSS, REFUND and ROLLBACK
-// are all in scope here (ticket 10) - only a reference that has not arrived
-// yet, or is itself still PENDING_REFERENCE, is out of scope, left for
-// ticket 11's durable PENDING_REFERENCE persistence and retry worker (see
-// wagering_reversals_test.go).
+// internal/httpapi's real HTTP contract for POST /wagering/transactions,
+// driven through appHarness against the same Postgres, Keycloak and MiniStack
+// every other test in this package uses. Reversals and the pending-reference
+// path live in wagering_reversals_test.go.
 
 // wageringHTTPResponse, wageringBodyInput and wageringBody are
-// test/testclient's shared DTOs and body builder (spec, seam 3: "o mesmo
-// cliente de teste roda em dois harnesses") - test/multiinstance uses the
-// same types.
+// test/testclient's shared DTOs and body builder - test/multiinstance uses
+// the same types.
 type wageringHTTPResponse = testclient.WageringHTTPResponse
 
 func decodeWageringResponse(t *testing.T, body []byte) wageringHTTPResponse {
@@ -74,8 +69,8 @@ func doWagering(t *testing.T, h *appHarness, providerToken string, in wageringBo
 func providerAToken(t *testing.T) string { t.Helper(); return fetchToken(t, providerAClient()) }
 func providerBToken(t *testing.T) string { t.Helper(); return fetchToken(t, providerBClient()) }
 
-// wageringDuplicateAttemptsMetric reads GET /metrics - public, per spec
-// ("Autenticação e autorização", "/metrics é público") - and parses out
+// wageringDuplicateAttemptsMetric reads GET /metrics - a public endpoint,
+// needing no token - and parses out
 // wagering_duplicate_attempts_total{channel="<channel>"}, so a test can
 // confirm the duplicate-attempts counter actually moved by a hand-written
 // amount, not just infer it from the replays it already counted itself.

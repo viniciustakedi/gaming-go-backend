@@ -1,10 +1,7 @@
 // Package envfile parses the KEY=VALUE runtime credential files
-// deploy/postgres/provision.sh and deploy/ministack/provision.sh write
-// (deploy/ministack/.runtime/app-credentials.env,
-// deploy/ministack/.runtime/test-credentials.env,
-// deploy/postgres/.runtime/credentials.env). It is the single parser for
-// that format, used by both production code (internal/pg, to read
-// wallet_app's own Postgres password) and this repository's tests.
+// deploy/postgres/provision.sh and deploy/ministack/provision.sh write. It is
+// the single parser for that format, used both by production code
+// (internal/pg, to read wallet_app's own Postgres password) and by tests.
 package envfile
 
 import (
@@ -23,11 +20,8 @@ var keyPattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 // remainder of the line, untrimmed and with no quote processing, so it may
 // itself contain `=`, spaces or quotes.
 //
-// A missing file, a line with no `=`, or a line with an invalid key all
-// return an error identifying path (and, for a malformed line, its line
-// number) - never the value itself, so a malformed credential is never
-// echoed back. The missing-file message names only path, with no
-// suggestion specific to any one caller.
+// Errors identify path (and, for a malformed line, its line number) but never
+// the value itself, so a malformed credential is never echoed back.
 func Read(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {

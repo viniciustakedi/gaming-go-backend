@@ -35,13 +35,11 @@ type wageringTransactionResponse struct {
 	IdempotentReplay bool                           `json:"idempotentReplay"`
 }
 
-// wageringTransactionsHandler implements POST /wagering/transactions (spec,
-// "Contratos HTTP"). The route itself requires the provider role
-// (requireRole, wired in server.go); this handler additionally refuses a
-// body whose providerId does not match the caller's own token claim, with
-// zero financial effect - the check runs before the use case is ever called
-// (spec, decision 7: "providerId do corpo diferente de provider_id devolve
-// 403").
+// wageringTransactionsHandler implements POST /wagering/transactions. The
+// route itself requires the provider role (requireRole, wired in
+// server.go); this handler additionally refuses a body whose providerId
+// does not match the caller's own token claim, with zero financial effect -
+// the check runs before the use case is ever called.
 func wageringTransactionsHandler(useCase *walletapp.ProcessOperationUseCase, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		identity, ok := auth.IdentityFromContext(r.Context())
@@ -125,18 +123,12 @@ func classifyWageringDecodeError(err error) (*operation.Error, []errorDetailItem
 }
 
 // statusForWageringError maps a classified error to the status this
-// endpoint's contract reserves for it (spec, "Contratos HTTP": "400
-// (formato) / 404 (WALLET_NOT_FOUND) / 422 (demais corrigíveis)"). The
-// classification catalog alone cannot tell a format problem apart from any
-// other correctable one, so the two format codes - a malformed request
-// (INVALID_REQUEST: bad JSON, an unknown field, an invalid UUID) and a
-// malformed money value (INVALID_MONEY) - are the only Correctable codes
-// singled out before falling through to the classification-driven mapping;
-// every other Correctable code (UNSUPPORTED_CURRENCY,
-// INVALID_AMOUNT_FOR_KIND, KIND_NOT_ALLOWED, MISSING_IDEMPOTENCY_KEY,
-// REFERENCE_NOT_ALLOWED, WALLET_PLAYER_MISMATCH, WALLET_CURRENCY_MISMATCH,
-// and REFERENCE_REQUIRED - not in the spec's table, so it follows the same
-// "422 for the rest" rule) lands on 422 through that switch.
+// endpoint's contract reserves for it. The classification catalog alone
+// cannot tell a format problem apart from any other correctable one, so the
+// two format codes - INVALID_REQUEST (bad JSON, an unknown field, an
+// invalid UUID) and INVALID_MONEY - are singled out before falling through
+// to the classification-driven mapping; every other Correctable code lands
+// on 422 through that switch.
 func statusForWageringError(err *operation.Error) int {
 	switch err.Code() {
 	case operation.CodeInvalidRequest, operation.CodeInvalidMoney:

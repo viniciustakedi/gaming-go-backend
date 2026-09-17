@@ -20,10 +20,7 @@ import (
 // startVerifierWithIssuer mirrors verifier_test.go's startVerifier, except it
 // lets the test pin a public-facing expected issuer distinct from the
 // discovery URL used to reach the fake OIDC provider - the exact split
-// discoverWithRetry makes with oidc.InsecureIssuerURLContext (see
-// verifier.go). No prior test in this package exercised issuerURL and
-// discoveryURL actually differing, which is what the ticket 07 re-review
-// flagged as untested.
+// discoverWithRetry makes with oidc.InsecureIssuerURLContext.
 func startVerifierWithIssuer(t *testing.T, provider *fakeOIDCProvider, issuerURL, audience string, clockSkew time.Duration) *OIDCVerifier {
 	t.Helper()
 	v := NewOIDCVerifier()

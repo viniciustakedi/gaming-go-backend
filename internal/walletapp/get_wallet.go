@@ -14,8 +14,7 @@ type GetWalletUseCase struct {
 }
 
 // NewGetWalletUseCase wires the use case to its repository. A read needs no
-// transaction, so this use case depends on WalletRepository directly, not
-// on UnitOfWork.
+// transaction, so this depends on WalletRepository directly, not UnitOfWork.
 func NewGetWalletUseCase(wallets WalletRepository) *GetWalletUseCase {
 	return &GetWalletUseCase{wallets: wallets}
 }

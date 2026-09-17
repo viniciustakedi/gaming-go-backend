@@ -19,20 +19,16 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletapp"
 )
 
-// sqlstateUniqueViolation is spelled out by hand rather than imported from
-// pgerrcode: decision 8 of the alignment restricts this repository's
-// dependencies, and pgerrcode is not among them - the same choice
-// test/integration/helpers_test.go already made.
+// sqlstateUniqueViolation is spelled out by hand because pgerrcode is not a
+// dependency of this package.
 const sqlstateUniqueViolation = "23505"
 
 // walletRepository is bound to one pg.Querier for its whole lifetime: the
-// pool itself, for the read-only instance internal/walletapp.
-// GetWalletUseCase uses, or one transaction's Querier, for the instance a
-// unitOfWork builds fresh inside WithinTx. internal/walletapp never sees
-// this binding - it only ever sees the walletapp.WalletRepository port.
+// pool itself, for the read-only instance GetWalletUseCase uses, or one
+// transaction's Querier, for the instance a unitOfWork builds fresh inside
+// WithinTx. internal/walletapp only ever sees the port, never this binding.
 type walletRepository struct{ q pg.Querier }
 
-// newWalletRepository builds the pgx-backed WalletRepository bound to q.
 func newWalletRepository(q pg.Querier) walletapp.WalletRepository {
 	return &walletRepository{q: q}
 }
@@ -53,13 +49,11 @@ func (r *walletRepository) Insert(ctx context.Context, w *domainwallet.Wallet) e
 		w.ID(), w.PlayerID(), string(currency), balance, w.Version(), w.CreatedAt(), w.UpdatedAt())
 	if err != nil {
 		var pgErr *pgconn.PgError
-		// This is the only backstop against a duplicate wallet: the
-		// application never SELECTs before INSERTing, so two concurrent
-		// opens for the same (playerId, currency) both reach this Exec, and
-		// only the one Postgres serializes first wins - the other gets this
-		// exact violation, translated to a conflict the use case maps to
-		// WALLET_ALREADY_EXISTS (spec: "uma segunda carteira ... mesmo sob
-		// aberturas concorrentes").
+		// The only backstop against a duplicate wallet: the application
+		// never SELECTs before INSERTing, so two concurrent opens for the
+		// same (playerId, currency) both reach this Exec and only the one
+		// Postgres serializes first wins. The loser gets this violation,
+		// which the use case maps to WALLET_ALREADY_EXISTS.
 		if errors.As(err, &pgErr) && pgErr.Code == sqlstateUniqueViolation && pgErr.ConstraintName == "wallets_player_id_currency_key" {
 			return walletapp.ErrAlreadyExists
 		}
@@ -76,8 +70,7 @@ func (r *walletRepository) FindByID(ctx context.Context, id string) (*domainwall
 }
 
 // FindForUpdate is FindByID's exact query plus FOR UPDATE, so the caller
-// holds an exclusive row lock on the wallet for the rest of its transaction
-// (spec, decision 3, step 2: "SELECT ... FOR UPDATE na linha da carteira").
+// holds an exclusive row lock on the wallet for the rest of its transaction.
 // Only ever called against a transaction-bound Querier - locking through the
 // bare pool would release the lock the instant this single statement's
 // implicit transaction ends.
@@ -117,9 +110,8 @@ func (r *walletRepository) find(ctx context.Context, sql string, id string) (*do
 
 // UpdateBalance persists w's current balance and version, conditioned on
 // previousVersion so a writer that no longer holds the row's lock can never
-// silently overwrite a newer state (spec: "UPDATE da carteira com WHERE
-// version = <lida>" - defense in depth alongside the FOR UPDATE lock, not a
-// substitute for it).
+// silently overwrite a newer state. Defense in depth alongside the FOR
+// UPDATE lock, not a substitute for it.
 func (r *walletRepository) UpdateBalance(ctx context.Context, w *domainwallet.Wallet, previousVersion int64) error {
 	balance, err := w.Balance().MinorUnits()
 	if err != nil {

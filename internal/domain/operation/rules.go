@@ -177,9 +177,8 @@ func isOpaqueIdentifier(value string) bool {
 }
 
 // IsCanonicalUUID reports whether value is a canonical UUID: lowercase
-// hexadecimal digits and hyphens in the 8-4-4-4-12 layout. It rejects
-// uppercase, unhyphenated, braced, or otherwise non-canonical spellings,
-// matching the spec's requirement that path UUIDs be canonical.
+// hexadecimal digits and hyphens in the 8-4-4-4-12 layout. Uppercase,
+// unhyphenated and braced spellings are rejected.
 func IsCanonicalUUID(value string) bool {
 	if len(value) != 36 {
 		return false

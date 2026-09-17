@@ -143,14 +143,13 @@ func TestRegisterLifecycle_StopReleasesPortForRetry(t *testing.T) {
 	}
 }
 
-// TestServer_BusinessNamespace_AuthenticatesBeforeRouting proves ticket 07
-// review's fix directly: a method New's mux never registers for /wallets or
-// /wallets/{walletId} (PUT, DELETE, PATCH, HEAD, OPTIONS) must answer 401
-// when unauthenticated - not the mux's own public 405 - and, once a valid
-// token is presented, fall through to the mux's ordinary 405 for a method
-// no route maps. This exercises Server.HTTP.Handler exactly as
-// RegisterLifecycle serves it, so it also proves authenticate really does
-// wrap the whole mux, not just the two registered routes.
+// TestServer_BusinessNamespace_AuthenticatesBeforeRouting pins that a method
+// the mux never registers for /wallets or /wallets/{walletId} (PUT, DELETE,
+// PATCH, HEAD, OPTIONS) answers 401 when unauthenticated - not the mux's own
+// public 405 - and falls through to the ordinary 405 once a valid token is
+// presented. It drives Server.HTTP.Handler exactly as RegisterLifecycle serves
+// it, so it also covers authenticate wrapping the whole mux rather than just
+// the registered routes.
 func TestServer_BusinessNamespace_AuthenticatesBeforeRouting(t *testing.T) {
 	verifier := fakeVerifier{identity: auth.Identity{Subject: "wallet-service-sub", Roles: []string{auth.RoleWalletAdmin}}}
 	cfg := testHTTPConfig(freeAddr(t))
@@ -203,14 +202,11 @@ func TestServer_BusinessNamespace_AuthenticatesBeforeRouting(t *testing.T) {
 }
 
 // TestServer_WalletsRoutes_ProviderWithWalletAdminNoProviderID_Preserves403
-// proves the re-review fix (Major #1): the wallet-admin-wins precedence
-// requireAnyRole added for the two read routes must not reach /wallets* or
-// POST /wagering/transactions, which keep requireRole - the exact same
-// implementation as before ticket 09 touched auth_middleware.go. On main,
-// a token carrying both provider and wallet-admin roles but no provider_id
-// is rejected as forbidden by requireRole's own global provider_id check,
-// before the wallet-admin role is even considered; that must still hold
-// here.
+// pins that requireAnyRole's wallet-admin-wins precedence does not leak into
+// /wallets* or POST /wagering/transactions, which keep requireRole. There, a
+// token carrying both provider and wallet-admin but no provider_id is still
+// forbidden by requireRole's global provider_id check, before the wallet-admin
+// role is considered at all.
 func TestServer_WalletsRoutes_ProviderWithWalletAdminNoProviderID_Preserves403(t *testing.T) {
 	verifier := fakeVerifier{identity: auth.Identity{
 		Subject: "sub",

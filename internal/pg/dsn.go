@@ -8,16 +8,11 @@ import (
 )
 
 // AppDSN sets wallet_app's own least-privilege credentials as baseDSN's
-// userinfo, so the application never connects to Postgres with the
-// migration owner's broader grants (spec: "a aplicação usa outro [papel],
-// com apenas os grants necessários"). baseDSN itself never carries any
-// credential (internal/config.Load assembles it from host/port/database/
-// sslmode alone, with no userinfo of its own to overwrite). The password is
-// read from credentialsFile, the file deploy/postgres/provision.sh writes
-// at every `docker compose up` (see README.md, "Credenciais do Postgres") -
-// the same one test/integration's own appDSN helper reads, so both ever
-// authenticate as wallet_app the same way, with a runtime-generated secret
-// never versioned or hardcoded here.
+// userinfo, so the application never connects with the migration owner's
+// broader grants. baseDSN carries no userinfo of its own to overwrite. The
+// password comes from credentialsFile, which deploy/postgres/provision.sh
+// rewrites on every `docker compose up`, so the secret is generated at
+// runtime and never versioned here.
 func AppDSN(baseDSN, credentialsFile string) (string, error) {
 	values, err := envfile.Read(credentialsFile)
 	if err != nil {

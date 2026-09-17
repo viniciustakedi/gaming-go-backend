@@ -1,7 +1,7 @@
 // Command wallet-service is the single binary that runs every role of the
-// wager wallet: `serve` composes the Fx application (HTTP, and - from later
-// tickets - the SQS consumer, outbox publisher and reference worker);
-// `migrate` applies or rolls back the schema.
+// wager wallet: `serve` composes the Fx application (HTTP, the SQS consumer,
+// the outbox publisher and the reference worker); `migrate` applies or rolls
+// back the schema.
 package main
 
 import (
@@ -53,10 +53,8 @@ func printUsage() {
 }
 
 // runServe builds the Fx application and blocks until SIGINT/SIGTERM, then
-// stops it. SIGTERM triggers the shutdown sequence internal/httpapi,
-// internal/pg and internal/queue register: readiness fails, the HTTP server
-// drains in-flight requests, and only then do the pool and SQS clients
-// release.
+// stops it: readiness fails first, the HTTP server drains in-flight requests,
+// and only then do the pool and SQS clients release.
 func runServe() error {
 	fxApp := app.New()
 

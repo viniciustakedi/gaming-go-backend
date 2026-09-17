@@ -13,16 +13,13 @@ const (
 )
 
 // authenticate wraps next so that, for every request outside isPublic,
-// routing itself never happens without a valid bearer token first (spec,
-// decision 7: "Ordem de checagem: autenticação → autorização → validação →
-// efeito"). It runs ahead of the mux, not inside a matched route's own
-// handler chain, precisely so a request under the business namespace that
-// no route maps - an unsupported method, a typo'd path - is rejected as
-// unauthorized rather than reaching the mux's own public 404/405 (ticket 07
-// review: "PUT /wallets sem token recebe o 405 público do mux, em vez de
-// 401"). Role checks stay out of this function: they depend on which route
-// matched, so requireRole (below) applies them afterward, inside the mux,
-// only once a route has actually been found.
+// routing itself never happens without a valid bearer token first. It runs
+// ahead of the mux, not inside a matched route's own handler chain,
+// precisely so a request under the business namespace that no route maps -
+// an unsupported method, a typo'd path - is rejected as unauthorized rather
+// than reaching the mux's own public 404/405. Role checks depend on which
+// route matched, so requireRole (below) applies them afterward, inside the
+// mux, only once a route has actually been found.
 func authenticate(verifier auth.Verifier, isPublic func(*http.Request) bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isPublic(r) {
@@ -47,14 +44,12 @@ func authenticate(verifier auth.Verifier, isPublic func(*http.Request) bool, nex
 }
 
 // requireRole wraps a single route's handler so it only runs for a caller
-// that authenticate has already verified and attached to the request
-// context, and that carries role. A caller authenticated with the provider
-// role but no provider_id claim is rejected here too, as forbidden rather
-// than unauthorized: the token itself verified fine, only the identity it
-// carries is incomplete for anything this API does with a provider (ticket
-// 07: "Provedor sem provider_id devolve 403"). The missing-identity branch
-// only matters if a route were ever wired up without going through
-// authenticate first - every route this package registers does.
+// that authenticate has already verified, and that carries role. A caller
+// with the provider role but no provider_id claim is rejected as forbidden
+// rather than unauthorized: the token itself verified fine, only the
+// identity it carries is incomplete. The missing-identity branch only
+// matters if a route were ever wired up without going through authenticate
+// first - every route this package registers does.
 func requireRole(role string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		identity, ok := auth.IdentityFromContext(r.Context())
@@ -76,18 +71,16 @@ func requireRole(role string, next http.HandlerFunc) http.HandlerFunc {
 }
 
 // requireAnyRole is requireRole's multi-role sibling, for the two read
-// routes ticket 09 adds: both a provider and wallet-admin may call them
-// (spec, "Autenticação e autorização", "GET /wagering/transactions/:id:
-// provider só vê as próprias transações ...; wallet-admin vê todas"), and
-// which one decides the caller's own visibility rule inside the use case,
-// not at this layer - this middleware only proves the caller has at least
-// one of the roles the route accepts.
+// routes both a provider and a wallet-admin may call. Which of the two the
+// caller is decides its visibility rule inside the use case, not at this
+// layer - this middleware only proves the caller has at least one of the
+// roles the route accepts.
 //
-// Precedence (the one place this is decided, ticket 09 review): wallet-admin
-// wins whenever the route accepts it, so a token carrying both roles is
-// never asked for provider_id - it already sees everything as an admin.
-// provider_id is only required from a caller acting as a provider, i.e. one
-// that does not clear the route on wallet-admin alone.
+// Precedence, decided here and nowhere else: wallet-admin wins whenever the
+// route accepts it, so a token carrying both roles is never asked for
+// provider_id - it already sees everything as an admin. provider_id is only
+// required from a caller acting as a provider, i.e. one that does not clear
+// the route on wallet-admin alone.
 func requireAnyRole(roles []string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		identity, ok := auth.IdentityFromContext(r.Context())
@@ -123,11 +116,8 @@ func roleAccepted(roles []string, role string) bool {
 // bearerToken extracts the token from a well-formed "Authorization: Bearer
 // <token>" header. The scheme is matched case-insensitively - HTTP auth
 // schemes are case-insensitive per RFC 7235 §2.1, and Keycloak client
-// libraries in the wild send every casing - and any run of whitespace
-// between scheme and token is accepted; a missing scheme, a scheme other
-// than Bearer, an empty token or more than one token after the scheme are
-// all rejected. It never logs the header or the token it returns (spec:
-// "Nunca registrar tokens, secrets, headers de autorização").
+// libraries in the wild send every casing. It never logs the header or the
+// token it returns.
 func bearerToken(r *http.Request) (string, bool) {
 	fields := strings.Fields(r.Header.Get("Authorization"))
 	if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") {

@@ -1,13 +1,11 @@
 //go:build integration || multiinstance
 
-// Package testclient is the test client the spec's seam 3 asks for: "o mesmo
-// cliente de teste roda em dois harnesses". It holds the wagering/wallet
-// DTOs, the HTTP request plumbing and Keycloak token retrieval shared by
-// test/integration's in-process harness (seam 3a, fxtest in one process) and
-// test/multiinstance's real-process harness (seam 3b, three OS processes) -
-// nothing here is a test itself, so both packages import it directly. The
-// build tag keeps it out of the production binary and out of `go build ./...`
-// without a tag.
+// Package testclient holds the wagering/wallet DTOs, the HTTP request
+// plumbing and Keycloak token retrieval shared by test/integration's
+// in-process harness (fxtest in one process) and test/multiinstance's
+// real-process harness (three OS processes) - nothing here is a test itself,
+// so both packages import it directly. The build tag keeps it out of the
+// production binary and out of `go build ./...` without a tag.
 package testclient
 
 import (
@@ -65,8 +63,7 @@ type WageringHTTPResponse struct {
 }
 
 // WageringBodyInput is the input to WageringBody - every field the wagering
-// HTTP contract accepts, ReferenceID included for REFUND/ROLLBACK (seam 3a,
-// and, since ticket 16's fault-injection scenarios, seam 3b too).
+// HTTP contract accepts, ReferenceID included for REFUND/ROLLBACK.
 type WageringBodyInput struct {
 	ProviderID  string
 	ExternalID  string
@@ -151,10 +148,9 @@ func UniqueID(prefix string) string {
 
 // NewUUID returns a random version-4 UUID string for the internal identifier
 // columns this schema types as UUID. The domain generates real ids as UUID
-// v7 (see alignment.md); a hand-rolled v4 generator needs only crypto/rand
-// and avoids pulling in a UUID dependency the alignment decisions never
-// called for - these tests only need a syntactically valid, unique UUID, not
-// any particular version's bit layout.
+// v7; a hand-rolled v4 generator needs only crypto/rand and avoids pulling in
+// a UUID dependency - these tests only need a syntactically valid, unique
+// UUID, not any particular version's bit layout.
 func NewUUID(t testing.TB) string {
 	t.Helper()
 	var buf [16]byte
@@ -216,8 +212,8 @@ func Do(ctx context.Context, t testing.TB, client *http.Client, method, url stri
 // out of a GET /metrics response body already read, returning 0 if the
 // series is absent (not yet incremented) - the independent source of truth a
 // duplicate-submission scenario checks against, so it proves the repeated
-// attempts actually reached the application (spec, Testing Decisions), not
-// only that the final result looks right.
+// attempts actually reached the application, not only that the final result
+// looks right.
 func DuplicateAttemptsMetric(t testing.TB, body []byte, channel string) float64 {
 	t.Helper()
 	prefix := fmt.Sprintf(`wagering_duplicate_attempts_total{channel="%s"} `, channel)

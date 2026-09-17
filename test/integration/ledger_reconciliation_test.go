@@ -11,8 +11,8 @@ import (
 	"testing"
 )
 
-// seam 3a - wallet-admin ledger paging and reconciliation through the fully
-// composed Fx application, with Postgres as the source of truth.
+// wallet-admin ledger paging and reconciliation through the fully composed Fx
+// application, with Postgres as the source of truth.
 type ledgerHTTPResponse struct {
 	Entries []struct {
 		SequenceNumber int64     `json:"sequenceNumber"`

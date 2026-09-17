@@ -28,12 +28,12 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
-// This is seam 3a: a gateway-role client publishes to the real FIFO while
-// the in-process Fx application consumes it. dlq-reader observes only the
-// production DLQ; redrive-tester and consumer-fixture exercise the disposable
-// redrive pair, all with pre-provisioned least-privilege test credentials.
-// The ledger and inbox reads are assertions only; the observed contract is a
-// single SQS message causing a single wallet debit, even on redelivery.
+// A gateway-role client publishes to the real FIFO while the in-process Fx
+// application consumes it. dlq-reader observes only the production DLQ;
+// redrive-tester and consumer-fixture exercise the disposable redrive pair,
+// all with pre-provisioned least-privilege test credentials. The ledger and
+// inbox reads are assertions only; the observed contract is a single SQS
+// message causing a single wallet debit, even on redelivery.
 func TestSQSConsumer_BetAndRedelivery_DebitsOnce(t *testing.T) {
 	t.Setenv("SQS_CONSUMER_ENABLED", "true")
 	t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")
@@ -198,11 +198,11 @@ func TestSQSConsumer_RollbackAndWinBeforeBet_AreCommittedPendingThenCompleted(t 
 	}
 }
 
-// These are seam 3a tests: the gateway publishes to the real production
-// input FIFO, the complete in-process Fx app consumes it, and dlq-reader is
-// a fixture credential with only ReceiveMessage/DeleteMessage on the real
-// DLQ. A unique marker in the body prevents stale DLQ residue from making an
-// assertion pass; each found message is deleted before the test returns.
+// The gateway publishes to the real production input FIFO, the complete
+// in-process Fx app consumes it, and dlq-reader is a fixture credential with
+// only ReceiveMessage/DeleteMessage on the real DLQ. A unique marker in the
+// body prevents stale DLQ residue from making an assertion pass; each found
+// message is deleted before the test returns.
 func TestSQSConsumer_InvalidOpening_GoesToDLQWithoutBlockingAnotherWallet(t *testing.T) {
 	t.Setenv("SQS_CONSUMER_ENABLED", "true")
 	t.Setenv("SQS_CONSUMER_POLL_WAIT", "1s")

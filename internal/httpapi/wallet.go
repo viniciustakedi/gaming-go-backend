@@ -58,10 +58,10 @@ func toWalletResponse(w *domainwallet.Wallet) walletResponse {
 }
 
 // openWalletHandler implements POST /wallets. Every corrigible input
-// problem this ticket lists - malformed JSON, unknown fields, an
-// out-of-format or out-of-allowlist money, a malformed playerId - answers
-// 400 with a stable code, and nothing is persisted for any of them, since
-// they are all caught before the use case ever opens a transaction.
+// problem - malformed JSON, unknown fields, an out-of-format or
+// out-of-allowlist money, a malformed playerId - answers 400 with a stable
+// code and persists nothing: all are caught before the use case ever opens
+// a transaction.
 func openWalletHandler(useCase *walletapp.OpenWalletUseCase, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req openWalletRequest
@@ -236,9 +236,8 @@ func decodeLedgerCursor(cursor string) (int64, error) {
 
 // classifyDecodeError distinguishes a money-shaped decode failure (the
 // Money type's own UnmarshalJSON error, propagated unwrapped by
-// encoding/json through the outer struct) from every other malformed-body
-// shape, which is a generic INVALID_REQUEST, and names the field each
-// traces back to.
+// encoding/json) from every other malformed-body shape, a generic
+// INVALID_REQUEST, and names the field each traces back to.
 func classifyDecodeError(err error) (*operation.Error, []errorDetailItem) {
 	var moneyErr *money.Error
 	if errors.As(err, &moneyErr) {
@@ -249,8 +248,7 @@ func classifyDecodeError(err error) (*operation.Error, []errorDetailItem) {
 }
 
 // correlationID returns the caller-supplied X-Correlation-Id header, or a
-// freshly generated one when absent (spec: "correlationId vem do header
-// X-Correlation-Id ou é gerado no HTTP").
+// freshly generated one when absent.
 func correlationID(r *http.Request) string {
 	if v := r.Header.Get("X-Correlation-Id"); v != "" {
 		return v

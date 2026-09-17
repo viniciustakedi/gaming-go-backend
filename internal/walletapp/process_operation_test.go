@@ -753,13 +753,10 @@ func TestProcessOperationUseCase_DoubleInsertConflict_TransientError(t *testing.
 	}
 }
 
-// TestProcessOperationUseCase_ExecuteInTx_NeverOpensItsOwnTransaction proves
-// ExecuteInTx runs entirely against the Repositories it is handed, without
-// ever going through the UnitOfWork: it is wired to an explodingUnitOfWork
-// that fails the test if WithinTx is called, then driven directly - exactly
-// how ticket 13's SQS consumer is meant to bind it to its own inbox
-// transaction (ticket 08 review, correctness/spec: "o caso de uso não pode
-// participar da transação externa").
+// TestProcessOperationUseCase_ExecuteInTx_NeverOpensItsOwnTransaction pins that
+// ExecuteInTx runs entirely against the Repositories it is handed, never going
+// through the UnitOfWork. That is what lets the SQS consumer bind it to its own
+// inbox transaction, so the wallet effect and the inbox row commit together.
 func TestProcessOperationUseCase_ExecuteInTx_NeverOpensItsOwnTransaction(t *testing.T) {
 	t.Parallel()
 	wallets := &fakeWalletRepository{findResult: testWallet(t, "100.00", 1)}
@@ -795,11 +792,10 @@ func TestProcessOperationUseCase_ExecuteInTx_NeverOpensItsOwnTransaction(t *test
 }
 
 // TestProcessOperationUseCase_ExecuteInTx_InsertConflict_ReturnsErrRetryInNewTransaction
-// proves the collision path ExecuteInTx itself exposes: it must never
-// retry the reclassification inside the same call, only report
-// ErrRetryInNewTransaction and let the caller that owns the transaction
-// (Process, here; the SQS consumer, in ticket 13) roll back and call it
-// again in a fresh one.
+// pins that ExecuteInTx never retries the reclassification inside the same
+// call. It only reports ErrRetryInNewTransaction, leaving the caller that owns
+// the transaction to roll back and call it again in a fresh one - the winning
+// writer's commit is not visible until then.
 func TestProcessOperationUseCase_ExecuteInTx_InsertConflict_ReturnsErrRetryInNewTransaction(t *testing.T) {
 	t.Parallel()
 	wallets := &fakeWalletRepository{findResult: testWallet(t, "100.00", 1)}
@@ -925,13 +921,11 @@ func TestProcessOperationUseCase_Prepare_ValidBet_ReturnsHashAndDecision(t *test
 }
 
 // TestProcessOperationUseCase_ExecuteInTx_ZeroValuePreparedOperation_RejectsWithoutTouchingRepositories
-// proves ExecuteInTx never trusts a PreparedOperation it did not itself
-// produce via Prepare: PreparedOperation{} is the only way to construct one
-// outside this package (no exported fields, no other exported constructor),
-// and ExecuteInTx must answer it with a classified error before calling any
-// repository - never a panic, never a persisted hash or decision this use
-// case never validated (ticket 08 re-review, Major: "PreparedOperation é
-// exportado e seus três campos são mutáveis").
+// pins that ExecuteInTx never trusts a PreparedOperation it did not produce.
+// PreparedOperation{} is the only one constructible outside this package - no
+// exported fields, no other exported constructor - and it must come back as a
+// classified error before any repository is called: never a panic, never a
+// persisted hash or decision the use case did not validate.
 func TestProcessOperationUseCase_ExecuteInTx_ZeroValuePreparedOperation_RejectsWithoutTouchingRepositories(t *testing.T) {
 	t.Parallel()
 	wallets := &fakeWalletRepository{findResult: testWallet(t, "100.00", 1)}

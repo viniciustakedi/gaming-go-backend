@@ -11,14 +11,9 @@ import (
 	"time"
 )
 
-// seam 3a - ticket 10's own slice of POST /wagering/transactions: REFUND,
-// ROLLBACK and a referenced WIN, each resolved against a reference that has
-// already arrived and reached a terminal status (spec, "Regras das
-// operações e referências"). A reference that has not arrived at all, or
-// has arrived but is itself still PENDING_REFERENCE, is out of this
-// ticket's scope - ticket 11's durable PENDING_REFERENCE persistence and
-// retry worker - and is only exercised here as the one documented "not
-// implemented" case (TestWageringReversal_MissingReference_NotImplemented).
+// The reversal slice of POST /wagering/transactions: REFUND, ROLLBACK and a
+// referenced WIN, resolved against references that have already arrived, plus
+// the durable PENDING_REFERENCE path for those that have not.
 
 // mustBetHTTP submits a processed BET for wallet in round and returns its
 // own externalId - the value every reversal test below references - along
@@ -167,12 +162,11 @@ func TestWageringRollback_OfWin_Debits(t *testing.T) {
 	}
 }
 
-// TestWageringRollback_OfRefund_DebitsAndBlocksNewRefund covers "ROLLBACK de
-// REFUND volta a debitar e impede novo reembolso": the original REFUND row
-// stays PROCESSED forever (transitions out of a terminal status are
-// rejected), so the BET it reversed still counts as having its one
-// successful reversal, and a second REFUND against it is REJECTED with
-// REFERENCE_ALREADY_REVERSED even after the REFUND itself was rolled back.
+// A rolled-back REFUND debits again without freeing the BET for a new
+// reversal: the original REFUND row stays PROCESSED forever (transitions out
+// of a terminal status are rejected), so the BET it reversed still counts as
+// having had its one successful reversal, and a second REFUND against it is
+// REJECTED with REFERENCE_ALREADY_REVERSED.
 func TestWageringRollback_OfRefund_DebitsAndBlocksNewRefund(t *testing.T) {
 	h := newAppHarness(t)
 	ctx := context.Background()
@@ -599,9 +593,9 @@ func TestWageringRefund_PendingReferenceExpiresRejected(t *testing.T) {
 	}
 }
 
-// seam 3a: two full Fx compositions share the same pending row. Their
-// independent workers may race, but exactly one terminal transition and one
-// financial effect are observable after the referenced BET arrives.
+// Two full Fx compositions share the same pending row. Their independent
+// workers may race, but exactly one terminal transition and one financial
+// effect are observable after the referenced BET arrives.
 func TestPendingReference_TwoWorkersCompleteItExactlyOnce(t *testing.T) {
 	t.Setenv("REFERENCE_WORKER_POLL_INTERVAL", "20ms")
 	h1 := newAppHarness(t)
@@ -805,11 +799,11 @@ func TestWageringPendingReference_RejectedReferenceIsRejectedNotProcessed(t *tes
 // TestReferenceWorker_StopCompletesFxComposition proves Stop abandons an
 // in-flight resume with a rollback: the pending reference must still be
 // PENDING_REFERENCE afterward, untouched, and become claimable again once
-// its own lease elapses, not after a retry backoff. Ordering used to be a
-// timer race - a worker polling on its own interval against this test's HTTP
-// round trips and lock acquisition - which stayed a race no matter how much
-// slack was added between the interval and the deadline. Instead, h1 starts
-// with its reference worker disabled (REFERENCE_WORKER_ENABLED=false), so
+// its own lease elapses, not after a retry backoff. Ordering here must never
+// rest on a timer - a worker polling on its own interval against this test's
+// HTTP round trips and lock acquisition stays a race no matter how much slack
+// separates the interval from the deadline. So h1 starts with its reference
+// worker disabled (REFERENCE_WORKER_ENABLED=false), so
 // nothing claims anything while the REFUND is submitted and the wallet lock
 // is taken; only once both are done does h2 - a second instance of the whole
 // Fx app - start with the worker enabled. Worker.start claims immediately

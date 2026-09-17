@@ -11,15 +11,13 @@ import (
 	"time"
 )
 
-// seam 3a - internal/httpapi's real HTTP contract for
+// internal/httpapi's real HTTP contract for
 // GET /wagering/transactions/:transactionId and
-// GET /providers/:providerId/wagering/transactions/:externalTransactionId
-// (ticket 09), driven through appHarness against the same Postgres,
-// Keycloak and MiniStack every other test in this package uses. Provider
-// isolation between provider-a and provider-b for POST and for idempotency
-// keys is already proven end to end by TestWageringProviderMismatch_ForbiddenWithNoEffect
-// and TestWageringIdempotencyKeys_ScopedByProvider in wagering_test.go; this
-// file covers the two read routes these tests do not touch.
+// GET /providers/:providerId/wagering/transactions/:externalTransactionId,
+// driven through appHarness against the same Postgres, Keycloak and MiniStack
+// every other test in this package uses. Provider isolation for POST and for
+// idempotency keys is proven in wagering_test.go; this file covers the two
+// read routes those tests do not touch.
 
 type transactionDetailHTTPResponse struct {
 	TransactionID                  string     `json:"transactionId"`
@@ -51,10 +49,10 @@ func decodeTransactionDetailResponse(t *testing.T, body []byte) transactionDetai
 	return resp
 }
 
-// assertUTCTimestamp proves the re-review fix (Major #2) against the real
-// Postgres codec, not just the fake repository: whatever zone the process
-// itself runs in, a TIMESTAMPTZ read back through the handler always comes
-// out as RFC 3339 UTC, terminated in "Z" - never a local offset.
+// assertUTCTimestamp holds the real Postgres codec, not just the fake
+// repository, to the wire contract: whatever zone the process itself runs in,
+// a TIMESTAMPTZ read back through the handler always comes out as RFC 3339
+// UTC, terminated in "Z" - never a local offset.
 func assertUTCTimestamp(t *testing.T, field, value string) {
 	t.Helper()
 	if !strings.HasSuffix(value, "Z") {
@@ -88,9 +86,7 @@ func getProviderWageringTransaction(t *testing.T, h *appHarness, token, provider
 }
 
 // openingTransactionID reads the internal id of wallet w's own OPENING row -
-// every wallet opened with a positive balance gets exactly one (spec:
-// "abertura com saldo inicial positivo credita ... e cria a transação
-// OPENING").
+// every wallet opened with a positive balance gets exactly one.
 func openingTransactionID(t *testing.T, ctx context.Context, h *appHarness, walletID string) string {
 	t.Helper()
 	var id string
@@ -152,10 +148,10 @@ func TestGetWageringTransactionByID_OtherProvider_NotFound(t *testing.T) {
 	}
 }
 
-// TestGetWageringTransactionByID_InternalOpening_NotFoundForProvider proves
-// a provider can never read the wallet's own internal OPENING transaction,
-// even though it shares the same walletId as its own operations (spec: "as
-// ... de origem interna devolvem 404, sem revelar existência").
+// TestGetWageringTransactionByID_InternalOpening_NotFoundForProvider proves a
+// provider can never read the wallet's own internal OPENING transaction, even
+// though it shares the same walletId as its own operations: 404, without
+// revealing that the row exists.
 func TestGetWageringTransactionByID_InternalOpening_NotFoundForProvider(t *testing.T) {
 	h := newAppHarness(t)
 	ctx := context.Background()
@@ -214,10 +210,10 @@ func TestGetWageringTransactionByID_MalformedID_Returns400(t *testing.T) {
 	}
 }
 
-// TestGetWageringTransactionByID_NonCanonicalUUID_Returns400 proves the
-// spec's requirement that the path id be a canonical UUID - lowercase,
-// hyphenated - end to end through the real mux (review: uuid.Parse alone
-// accepted uppercase and other non-canonical spellings).
+// TestGetWageringTransactionByID_NonCanonicalUUID_Returns400 proves the path
+// id must be a canonical UUID - lowercase, hyphenated - end to end through
+// the real mux. uuid.Parse alone accepts uppercase and other non-canonical
+// spellings, so the route needs its own check.
 func TestGetWageringTransactionByID_NonCanonicalUUID_Returns400(t *testing.T) {
 	h := newAppHarness(t)
 	canonical := newUUID(t)
@@ -279,7 +275,7 @@ func TestGetProviderWageringTransaction_Owner_ReturnsFullRecord(t *testing.T) {
 
 // TestGetProviderWageringTransaction_MismatchedProvider_Forbidden proves
 // provider-b cannot read provider-a's transaction through the provider-scoped
-// route either (spec: "provider com providerId diferente devolve 403").
+// route either - 403, not 404, since the path names the provider explicitly.
 func TestGetProviderWageringTransaction_MismatchedProvider_Forbidden(t *testing.T) {
 	h := newAppHarness(t)
 	wallet := openWalletHTTP(t, h, "100.00")
@@ -343,11 +339,11 @@ func TestGetProviderWageringTransaction_Nonexistent_Returns404(t *testing.T) {
 	}
 }
 
-// specTransactionDetailKeys is every key the spec's "registro completo"
-// requires in the wire body, present or not - a review finding
-// (`omitempty` silently dropping a key instead of sending it as null) is
-// invisible to transactionDetailHTTPResponse's typed decode above, so these
-// two tests decode into a bare map instead.
+// specTransactionDetailKeys is every key the complete record must carry in
+// the wire body, present or not. An `omitempty` silently dropping a key
+// instead of sending it as null is invisible to
+// transactionDetailHTTPResponse's typed decode above, so the two tests below
+// decode into a bare map instead.
 var specTransactionDetailKeys = []string{
 	"transactionId", "externalTransactionId", "providerId", "playerId", "walletId",
 	"roundId", "gameId", "kind", "origin", "money",
@@ -379,8 +375,7 @@ func assertNullKeys(t *testing.T, decoded map[string]any, keys ...string) {
 // TestGetWageringTransactionByID_NoReference_NullKeysPresent proves a plain
 // BET - no reference at all - still sends referenceExternalTransactionId,
 // referenceTransactionId, failureCode, nextAttemptAt and pendingExpiresAt as
-// explicit null rather than omitting them (review: "omitempty elimina
-// campos condicionais/nulos").
+// explicit null rather than omitting them.
 func TestGetWageringTransactionByID_NoReference_NullKeysPresent(t *testing.T) {
 	h := newAppHarness(t)
 	wallet := openWalletHTTP(t, h, "100.00")
@@ -403,8 +398,8 @@ func TestGetWageringTransactionByID_NoReference_NullKeysPresent(t *testing.T) {
 	assertNullKeys(t, decoded, "referenceExternalTransactionId", "referenceTransactionId", "failureCode", "nextAttemptAt", "pendingExpiresAt")
 }
 
-// TestGetWageringTransactionByID_AdminOpening_NullKeysPresent proves the
-// same fix for the INTERNAL OPENING row wallet-admin alone can read:
+// TestGetWageringTransactionByID_AdminOpening_NullKeysPresent proves the same
+// for the INTERNAL OPENING row wallet-admin alone can read:
 // externalTransactionId, providerId, roundId and gameId - none of which an
 // OPENING row ever carries - are sent as explicit null.
 func TestGetWageringTransactionByID_AdminOpening_NullKeysPresent(t *testing.T) {

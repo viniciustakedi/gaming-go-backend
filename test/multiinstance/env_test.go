@@ -30,8 +30,7 @@ func ownerDSN() string {
 	return defaultOwnerDSN
 }
 
-// envOrDefault and keycloakIssuerURL are test/testclient's shared helpers
-// (spec, seam 3: "o mesmo cliente de teste roda em dois harnesses") -
+// envOrDefault and keycloakIssuerURL are test/testclient's shared helpers -
 // test/integration uses the same package.
 func envOrDefault(key, fallback string) string { return testclient.EnvOrDefault(key, fallback) }
 

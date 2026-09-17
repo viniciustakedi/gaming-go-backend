@@ -10,16 +10,14 @@ import (
 
 // Caller identifies who is asking to read a transaction: an authenticated
 // provider, scoped to ProviderID, or the internal wallet-admin service,
-// which sees every transaction, including the INTERNAL OPENING row (spec:
-// "wallet-admin vê todas, inclusive OPENING").
+// which sees every transaction, including the INTERNAL OPENING row.
 type Caller struct {
 	ProviderID string
 	IsAdmin    bool
 }
 
-// GetTransactionUseCase resolves the two read routes the spec's "Contratos
-// HTTP" table lists for wagering transactions. Both are pure reads: no
-// UnitOfWork, no transaction boundary, the same shape as GetWalletUseCase.
+// GetTransactionUseCase resolves the two wagering-transaction read routes.
+// Both are pure reads: no UnitOfWork, no transaction boundary.
 type GetTransactionUseCase struct {
 	transactions WagerTransactionRepository
 }
@@ -32,9 +30,8 @@ func NewGetTransactionUseCase(transactions WagerTransactionRepository) *GetTrans
 // ByID resolves GET /wagering/transactions/:transactionId. A provider only
 // ever sees its own EXTERNAL rows; anything else - another provider's row,
 // or the INTERNAL OPENING row - answers exactly like a row that does not
-// exist, so a provider probing ids can never learn which ones are real
-// (spec: "as de outro provedor e as de origem interna devolvem 404, sem
-// revelar existência"). wallet-admin sees every row unconditionally.
+// exist, so a provider probing ids can never learn which ones are real.
+// wallet-admin sees every row unconditionally.
 func (uc *GetTransactionUseCase) ByID(ctx context.Context, id string, caller Caller) (*TransactionDetail, error) {
 	detail, err := uc.transactions.FindDetailByID(ctx, id)
 	if err != nil {
@@ -55,10 +52,9 @@ func (uc *GetTransactionUseCase) ByID(ctx context.Context, id string, caller Cal
 // ByProviderExternalID resolves GET
 // /providers/:providerId/wagering/transactions/:externalTransactionId. The
 // route's own providerId governs the lookup: a provider caller must match it
-// exactly (ErrForbiddenProvider otherwise, spec: "provider com providerId
-// diferente devolve 403"), while wallet-admin may pass any providerId (spec:
-// "wallet-admin vê qualquer uma"). The mismatch check runs before the query,
-// so a wrong providerId never even reaches the repository.
+// exactly (ErrForbiddenProvider otherwise), while wallet-admin may pass any
+// providerId. The mismatch check runs before the query, so a wrong providerId
+// never even reaches the repository.
 func (uc *GetTransactionUseCase) ByProviderExternalID(ctx context.Context, routeProviderID, externalTransactionID string, caller Caller) (*TransactionDetail, error) {
 	if !caller.IsAdmin && caller.ProviderID != routeProviderID {
 		return nil, ErrForbiddenProvider

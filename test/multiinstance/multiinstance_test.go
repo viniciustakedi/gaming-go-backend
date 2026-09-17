@@ -9,23 +9,20 @@ import (
 	"testing"
 )
 
-// Every scenario in this file is seam 3b (spec, "Seams acordados"): the
-// same financial guarantees seam 3a already proves in one fxtest process,
-// now proved across three independent wallet-service processes - separate
-// memory, separate connections - disputing the same wallets over the same
-// Postgres, MiniStack and Keycloak. The database is read only for
-// assertions, never to drive the scenario itself (spec, seam 3: "O banco é
-// lido só para asserções").
+// The same financial guarantees test/integration proves in one fxtest
+// process, now proved across three independent wallet-service processes -
+// separate memory, separate connections - disputing the same wallets over the
+// same Postgres, MiniStack and Keycloak. The database is read only for
+// assertions, never to drive the scenario itself.
 
 func adminToken(t *testing.T) string     { t.Helper(); return fetchToken(t, walletServiceClient()) }
 func providerAToken(t *testing.T) string { t.Helper(); return fetchToken(t, providerAClient()) }
 
-// TestMultiInstance_TwoBetsExceedingBalance_OneOnEachInstance is the
-// ticket's own acceptance scenario: 80.00 + 80.00 over a 100.00 wallet,
-// each BET submitted to a different instance, must settle to exactly one
-// PROCESSED, one INSUFFICIENT_FUNDS, balance "20.00" and a single debit -
-// the FOR UPDATE row lock on the wallet has to serialize the two instances
-// exactly as it would two goroutines in one process.
+// 80.00 + 80.00 over a 100.00 wallet, each BET submitted to a different
+// instance, must settle to exactly one PROCESSED, one INSUFFICIENT_FUNDS,
+// balance "20.00" and a single debit - the FOR UPDATE row lock on the wallet
+// has to serialize the two instances exactly as it would two goroutines in
+// one process.
 func TestMultiInstance_TwoBetsExceedingBalance_OneOnEachInstance(t *testing.T) {
 	instances := startTrio(t)
 	ctx := context.Background()
@@ -99,9 +96,9 @@ func TestMultiInstance_TwoBetsExceedingBalance_OneOnEachInstance(t *testing.T) {
 
 // TestMultiInstance_SameBetFiftyTimesAcrossInstances_OneDebit sends the same
 // BET, same Idempotency-Key, fifty times, round-robined across all three
-// instances at once - the ticket's own scenario. Only one of the fifty may
-// be a genuine PROCESSED; the rest must observe the first one's persisted
-// result as a replay, regardless of which instance they landed on.
+// instances at once. Only one of the fifty may be a genuine PROCESSED; the
+// rest must observe the first one's persisted result as a replay, regardless
+// of which instance they landed on.
 func TestMultiInstance_SameBetFiftyTimesAcrossInstances_OneDebit(t *testing.T) {
 	instances := startTrio(t)
 	ctx := context.Background()
@@ -162,13 +159,11 @@ func TestMultiInstance_SameBetFiftyTimesAcrossInstances_OneDebit(t *testing.T) {
 		t.Fatalf("newAttempts = %d, replays = %d, want exactly 1 and %d", newAttempts, replays, attempts-1)
 	}
 
-	// The spec requires proving the repeated attempts actually reached the
-	// application via the duplicate-attempts metric, not just inferring it
-	// from the replays already counted above - and, since the 50 attempts
-	// are spread round-robin across all three instances, that proof has to
-	// sum each instance's own increment (spec, Testing Decisions: "Os testes
-	// de duplicidade provam que as entradas repetidas chegaram de fato à
-	// aplicação, pela métrica de duplicatas").
+	// The duplicate-attempts metric proves the repeated attempts actually
+	// reached the application, rather than inferring it from the replays
+	// already counted above. Since the 50 attempts are spread round-robin
+	// across all three instances, that proof has to sum each instance's own
+	// increment.
 	var duplicatesIncrease float64
 	for i, inst := range instances {
 		duplicatesIncrease += duplicateAttemptsMetric(t, inst, "HTTP") - duplicatesBaseline[i]
@@ -251,9 +246,7 @@ func TestMultiInstance_DistinctWalletsAcrossInstances_ProcessInParallel(t *testi
 // the exact same request to a different instance than the one that
 // originally processed it. The replay must return the original transaction
 // id, status and balance - never move money again - proving idempotency
-// survives every instance losing its in-memory state at once (ticket:
-// "todas as instâncias reiniciadas, com replay idempotente devolvendo o
-// resultado original e saldo conferido contra o ledger").
+// survives every instance losing its in-memory state at once.
 func TestMultiInstance_RestartAllInstances_ReplayIsIdempotent(t *testing.T) {
 	instances := startTrio(t)
 	ctx := context.Background()

@@ -51,8 +51,8 @@ func ProviderBClient() KeycloakClient {
 }
 
 // FetchToken exchanges client credentials for a real access token via
-// Keycloak's own token endpoint - client_credentials grant, spec decision 7
-// - never a token this package fabricates itself.
+// Keycloak's own token endpoint - never a token this package fabricates
+// itself.
 func FetchToken(ctx context.Context, t testing.TB, httpClient *http.Client, client KeycloakClient) string {
 	t.Helper()
 

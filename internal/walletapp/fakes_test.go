@@ -9,13 +9,10 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/walletapp"
 )
 
-// fakeUnitOfWork runs fn directly, handing it whichever fake repositories
-// the test constructed it with: the point of these tests is the use case's
-// own decisions (what it builds, what it calls, how it classifies errors),
-// not SQL or transaction boundaries - those are covered at seam 3a against
-// a real Postgres. calls counts every WithinTx invocation, so a test can
-// prove a correctable input never opens a transaction at all (ticket 08
-// re-review: "validar e calcular o hash fora da transação").
+// fakeUnitOfWork runs fn directly against whichever fake repositories the test
+// constructed it with: these tests cover the use case's own decisions, not SQL
+// or transaction boundaries. calls counts every WithinTx invocation, so a test
+// can pin that a correctable input never opens a transaction at all.
 type fakeUnitOfWork struct {
 	wallets      walletapp.WalletRepository
 	transactions walletapp.WagerTransactionRepository
@@ -34,11 +31,9 @@ func (f *fakeUnitOfWork) WithinTx(ctx context.Context, fn func(context.Context, 
 	})
 }
 
-// explodingUnitOfWork fails the test the instant WithinTx is called, so a
-// test that drives ProcessOperationUseCase.ExecuteInTx directly - never
-// through Process - proves ExecuteInTx never opens a transaction of its
-// own (ticket 08 review, correctness: "o caso de uso não pode abrir sua
-// própria UnitOfWork quando chamado dentro de uma transação externa").
+// explodingUnitOfWork fails the test the instant WithinTx is called, so a test
+// driving ExecuteInTx directly pins that it never opens a transaction of its
+// own - it has to be able to join a caller's external transaction.
 type explodingUnitOfWork struct{ t *testing.T }
 
 func (f explodingUnitOfWork) WithinTx(context.Context, func(context.Context, walletapp.Repositories) error) error {

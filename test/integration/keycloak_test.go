@@ -11,16 +11,14 @@ import (
 
 // tokenHTTPClient is the client every fetchToken call shares - a bounded
 // timeout so a Keycloak that stops responding mid-suite fails the affected
-// test instead of hanging it (ticket 07 review: "fetchToken ... sem
-// context.Context nem timeout").
+// test instead of hanging it.
 var tokenHTTPClient = testclient.NewHTTPClient(10 * time.Second)
 
 // keycloakClient, keycloakIssuerURL, envOrDefault, fetchToken and the
 // walletServiceClient/providerAClient/providerBClient fixtures are
-// test/testclient's shared Keycloak client (spec, seam 3: "o mesmo cliente
-// de teste roda em dois harnesses") - test/multiinstance uses the same
-// package. noRolesClient and shortLivedProviderClient stay local: seam 3b
-// does not exercise auth failure scenarios, so they are not shared.
+// test/testclient's shared Keycloak client - test/multiinstance uses the same
+// package. noRolesClient and shortLivedProviderClient stay local, since only
+// this package exercises auth failure scenarios.
 type keycloakClient = testclient.KeycloakClient
 
 func envOrDefault(key, fallback string) string { return testclient.EnvOrDefault(key, fallback) }
@@ -54,8 +52,8 @@ func shortLivedProviderClient() keycloakClient {
 }
 
 // fetchToken exchanges client credentials for a real access token via
-// Keycloak's own token endpoint - client_credentials grant, spec decision 7
-// - never a token this package fabricates itself.
+// Keycloak's own token endpoint - never a token this package fabricates
+// itself.
 func fetchToken(t *testing.T, client keycloakClient) string {
 	t.Helper()
 	return testclient.FetchToken(t.Context(), t, tokenHTTPClient, client)

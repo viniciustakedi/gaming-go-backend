@@ -6,10 +6,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// newID mints an internal identifier as UUID v7 (spec: "Identificadores
-// internos são UUID v7 gerados na aplicação"), so ids sort roughly by
-// creation time without leaking any of the entropy problems a naive
-// timestamp-prefixed id would have.
+// newID mints an internal identifier as UUID v7, so ids sort roughly by
+// creation time without the entropy problems of a naive timestamp-prefixed
+// id.
 func newID() (string, error) {
 	id, err := uuid.NewV7()
 	if err != nil {

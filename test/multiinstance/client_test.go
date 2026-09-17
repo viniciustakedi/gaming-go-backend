@@ -15,8 +15,7 @@ const testCurrency = "BRL"
 var httpClient = testclient.NewHTTPClient(10 * time.Second)
 
 // wageringBodyInput, wageringHTTPResponse and walletHTTPResponse are
-// test/testclient's shared DTOs (spec, seam 3: "o mesmo cliente de teste
-// roda em dois harnesses") - test/integration uses the same types.
+// test/testclient's shared DTOs - test/integration uses the same types.
 type wageringBodyInput = testclient.WageringBodyInput
 type wageringHTTPResponse = testclient.WageringHTTPResponse
 type walletHTTPResponse = testclient.WalletHTTPResponse
@@ -36,9 +35,9 @@ func decodeWalletResponse(t *testing.T, body []byte) walletHTTPResponse {
 
 // doAt issues one HTTP request against inst, bound to t's own context.
 // Unlike test/integration's single-baseURL appHarness, every call here names
-// its instance explicitly - the whole point of seam 3b is that a scenario's
-// calls can land on *different* wallet-service processes while still
-// hitting the same Postgres, MiniStack and Keycloak.
+// its instance explicitly: a scenario's calls can land on *different*
+// wallet-service processes while still hitting the same Postgres, MiniStack
+// and Keycloak.
 func doAt(t *testing.T, inst *instance, method, path, token string, body []byte) (*http.Response, []byte) {
 	t.Helper()
 	headers := map[string]string{}
@@ -66,12 +65,10 @@ func openWalletAt(t *testing.T, inst *instance, adminToken, playerID, amount str
 	return decodeWalletResponse(t, body)
 }
 
-// duplicateAttemptsMetric reads GET /metrics on inst - public, per spec
-// ("Autenticação e autorização", "/metrics é público") - and parses out
+// duplicateAttemptsMetric reads GET /metrics on inst - a public endpoint,
+// needing no token - and parses out
 // wagering_duplicate_attempts_total{channel="<channel>"}, the independent
-// source of truth a duplicate-submission scenario checks against (spec,
-// Testing Decisions: "Os testes de duplicidade provam que as entradas
-// repetidas chegaram de fato à aplicação, pela métrica de duplicatas").
+// source of truth a duplicate-submission scenario checks against.
 func duplicateAttemptsMetric(t *testing.T, inst *instance, channel string) float64 {
 	t.Helper()
 	resp, body := doAt(t, inst, http.MethodGet, "/metrics", "", nil)

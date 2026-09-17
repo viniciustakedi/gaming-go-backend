@@ -16,17 +16,14 @@ import (
 
 type transactionRepository struct{ q pg.Querier }
 
-// newWagerTransactionRepository builds the pgx-backed
-// WagerTransactionRepository bound to q.
 func newWagerTransactionRepository(q pg.Querier) walletapp.WagerTransactionRepository {
 	return &transactionRepository{q: q}
 }
 
 // Insert writes one wager_transactions row unconditionally. Attempts,
-// next_attempt_at and pending_expires_at are left to their column defaults
-// (0 / NULL / NULL): this ticket only ever inserts an already-terminal
-// OPENING row this way, which never needs any of the three - the reference
-// worker (ticket 11) is what first populates them.
+// next_attempt_at and pending_expires_at keep their column defaults
+// (0 / NULL / NULL); the pending-reference worker is what first populates
+// them.
 func (r *transactionRepository) Insert(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error {
 	fields, err := transactionFields(t, resultingBalance)
 	if err != nil {
@@ -39,15 +36,12 @@ func (r *transactionRepository) Insert(ctx context.Context, t *domainwallet.Wage
 }
 
 // InsertNew is Insert's ON CONFLICT DO NOTHING sibling for an external
-// operation, the backstop the spec calls for at decision 3, step 5: a
-// concurrent writer whose request body carried a different walletId never
-// contends for the same FOR UPDATE lock, so this INSERT - not the lock - is
-// what stops it from creating a second row for the same (providerId,
-// idempotencyKey) or (providerId, externalTransactionId) pair. inserted is
-// false exactly when that backstop fired, telling the caller to roll back
-// and reclassify the attempt in a fresh transaction rather than commit
-// nothing here and press on inside one whose own INSERT already failed to
-// affect a row.
+// operation. A concurrent writer whose request body carried a different
+// walletId never contends for the same FOR UPDATE lock, so this INSERT -
+// not the lock - is what stops a second row for the same (providerId,
+// idempotencyKey) or (providerId, externalTransactionId) pair. A false
+// result means that backstop fired: the caller must roll back and
+// reclassify the attempt in a fresh transaction.
 func (r *transactionRepository) InsertNew(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) (bool, error) {
 	fields, err := transactionFields(t, resultingBalance)
 	if err != nil {
@@ -92,10 +86,9 @@ const insertPendingWagerTransactionSQL = `
 		resulting_balance, created_at, updated_at, next_attempt_at, pending_expires_at
 	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,now() + $22::interval)`
 
-// transactionFields builds insertWagerTransactionSQL's positional arguments
-// from a domain transaction, mirroring WagerTransaction.validate(): an
-// INTERNAL row's provider metadata columns are all NULL, an EXTERNAL row's
-// are all populated.
+// transactionFields builds insertWagerTransactionSQL's positional arguments,
+// mirroring WagerTransaction.validate(): an INTERNAL row's provider metadata
+// columns are all NULL, an EXTERNAL row's are all populated.
 func transactionFields(t *domainwallet.WagerTransaction, resultingBalance *int64) ([]any, error) {
 	amount, err := t.Money().MinorUnits()
 	if err != nil {
@@ -140,8 +133,8 @@ func transactionFields(t *domainwallet.WagerTransaction, resultingBalance *int64
 
 // FindByIdempotencyKey and FindByExternalTransactionID both look up an
 // EXTERNAL row by one of the two columns idempotency is scoped by provider
-// on (spec: "o escopo de chaves é por provedor"); an INTERNAL row's
-// provider_id is always NULL, so neither can ever match one.
+// on; an INTERNAL row's provider_id is always NULL, so neither can ever
+// match one.
 func (r *transactionRepository) FindByIdempotencyKey(ctx context.Context, providerID, idempotencyKey string) (*walletapp.ExistingTransaction, error) {
 	return r.findExisting(ctx, `
 		SELECT id, external_transaction_id, idempotency_key, payload_hash, status, failure_code, resulting_balance, currency, pending_expires_at
@@ -183,10 +176,9 @@ func (r *transactionRepository) findExisting(ctx context.Context, sql, providerI
 }
 
 // FindReference resolves a REFUND, ROLLBACK or referenced WIN's reference
-// by (providerId, referenceExternalTransactionId) (spec, "Regras das
-// operações e referências"). It rehydrates the full domain transaction -
-// not just the handful of fields operation.Evaluate reads - so a corrupted
-// row fails validate() here rather than being silently trusted.
+// by (providerId, referenceExternalTransactionId). It rehydrates the full
+// domain transaction - not just the fields operation.Evaluate reads - so a
+// corrupted row fails validate() here rather than being silently trusted.
 func (r *transactionRepository) FindReference(ctx context.Context, providerID, referenceExternalTransactionID string) (*domainwallet.WagerTransaction, error) {
 	row := r.q.QueryRow(ctx, `
 		SELECT id, external_transaction_id, provider_id, idempotency_key, payload_hash,
@@ -243,12 +235,11 @@ func (r *transactionRepository) FindReference(ctx context.Context, providerID, r
 	return transaction, nil
 }
 
-// ExistsSuccessfulReversal backs the partial unique index's application-side
-// counterpart (spec, migration 0004: "wager_transactions_reversal_per_reference_idx").
-// It is only ever queried while this call still holds the referenced
-// transaction's wallet FOR UPDATE lock, so a concurrent REFUND and ROLLBACK
-// of the same BET can never both observe false: the second one always runs
-// after the first's commit has become visible.
+// ExistsSuccessfulReversal is the application-side counterpart of the partial
+// unique index wager_transactions_reversal_per_reference_idx. It is only ever
+// queried while the caller still holds the referenced transaction's wallet
+// FOR UPDATE lock, so a concurrent REFUND and ROLLBACK of the same BET can
+// never both observe false.
 func (r *transactionRepository) ExistsSuccessfulReversal(ctx context.Context, referenceTransactionID string) (bool, error) {
 	var exists bool
 	if err := r.q.QueryRow(ctx, `
@@ -345,12 +336,9 @@ func (r *transactionRepository) CompletePending(ctx context.Context, t *domainwa
 }
 
 // transactionDetailColumns backs both FindDetailByID and
-// FindDetailByProviderExternalID: the full row the spec's "Contratos HTTP"
-// registro completo needs, including the attempts/next_attempt_at/
-// pending_expires_at columns no domain rehydration path reads yet (they
-// exist for ticket 11's worker) - this ticket reads them as plain columns
-// instead of going through domainwallet.RehydrateTransaction, which does
-// not expose them.
+// FindDetailByProviderExternalID. attempts, next_attempt_at and
+// pending_expires_at are read as plain columns because
+// domainwallet.RehydrateTransaction does not expose them.
 const transactionDetailColumns = `
 	id, external_transaction_id, provider_id, player_id, wallet_id, round_id, game_id,
 	kind, origin, amount, currency, reference_external_transaction_id, reference_transaction_id,
@@ -376,9 +364,8 @@ func (r *transactionRepository) FindDetailByProviderExternalID(ctx context.Conte
 }
 
 // scanTransactionDetail unmarshals one transactionDetailColumns row.
-// ErrNotFound is returned bare, not wrapped, so both callers above can
-// still wrap it with their own context while errors.Is(_, walletapp.ErrNotFound)
-// keeps working for the use case.
+// ErrNotFound is returned bare so both callers can wrap it with their own
+// context while errors.Is(_, walletapp.ErrNotFound) keeps working.
 func scanTransactionDetail(row pgx.Row) (*walletapp.TransactionDetail, error) {
 	var (
 		id, playerID, walletID, kind, origin, currency, status   string

@@ -14,13 +14,8 @@ const (
 	CodeReferenceRequired     Code = "REFERENCE_REQUIRED"
 	CodeReferenceNotAllowed   Code = "REFERENCE_NOT_ALLOWED"
 	CodeWalletNotFound        Code = "WALLET_NOT_FOUND"
-	// CodeTransactionNotFound is not in the spec's own catalog (it lists
-	// only the codes POST /wagering/transactions can return); it follows
-	// WALLET_NOT_FOUND's precedent for the two GET routes ticket 09 adds,
-	// which need a stable code for "no such transaction, or the caller is
-	// not authorized to see it" without revealing which (spec, "Contratos
-	// HTTP", GET .../transactions/:id: "as de outro provedor ... devolvem
-	// 404, sem revelar existência").
+	// CodeTransactionNotFound also covers a transaction owned by another
+	// provider, so a 404 never reveals that the transaction exists.
 	CodeTransactionNotFound           Code = "TRANSACTION_NOT_FOUND"
 	CodeWalletPlayerMismatch          Code = "WALLET_PLAYER_MISMATCH"
 	CodeWalletCurrencyMismatch        Code = "WALLET_CURRENCY_MISMATCH"

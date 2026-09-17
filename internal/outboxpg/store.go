@@ -17,9 +17,9 @@ type store struct{ pool *pgxpool.Pool }
 // NewStore builds the PostgreSQL adapter for the outbox publisher.
 func NewStore(pool *pgxpool.Pool) outbox.Store { return &store{pool: pool} }
 
-// Claim claims an isolated publisher batch in its own short transaction. This
-// is not a use-case transaction: its only purpose is atomically selecting and
-// leasing rows before queue I/O, so it must commit before the publisher sends.
+// Claim leases a publisher batch in its own short transaction. Its only
+// purpose is atomically selecting and leasing rows before queue I/O, so it
+// must commit before the publisher sends.
 func (s *store) Claim(ctx context.Context, batch int, lease time.Duration) ([]outbox.Record, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -27,12 +27,11 @@ func (s *store) Claim(ctx context.Context, batch int, lease time.Duration) ([]ou
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// next_attempt_at is the backoff deadline and is never moved by a claim.
-	// locked_until is the exclusive lease deadline. Both eligibility deadlines
-	// and their updates use PostgreSQL's now(), so process clock drift cannot
-	// make an active lease expire early. The 0007 partial pending index remains
-	// suitable: it still narrows unpublished rows by next_attempt_at, while the
-	// lease predicate filters only candidates whose backoff is already due.
+	// next_attempt_at is the backoff deadline and is never moved by a claim;
+	// locked_until is the exclusive lease deadline. Both deadlines and their
+	// updates use PostgreSQL's now(), so process clock drift cannot make an
+	// active lease expire early. The 0007 partial pending index still
+	// applies: it narrows unpublished rows by next_attempt_at.
 	rows, err := tx.Query(ctx, `
 		WITH candidates AS (
 			SELECT event_id

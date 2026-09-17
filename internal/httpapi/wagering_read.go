@@ -15,20 +15,18 @@ import (
 )
 
 // maxOpaqueIdentifierBytes mirrors the schema's own bound on providerId and
-// externalTransactionId (migration 0004: "octet_length(...) BETWEEN 1 AND
-// 255") - a path segment outside it can never match a stored row, so it is
-// rejected as malformed (400) before ever reaching the use case.
+// externalTransactionId (migration 0004) - a path segment outside it can
+// never match a stored row, so it is rejected as malformed (400) before
+// ever reaching the use case.
 const maxOpaqueIdentifierBytes = 255
 
 // transactionDetailResponse is the wire shape for both wagering transaction
-// read routes (spec, "Contratos HTTP": "registro completo: ids, tipo,
-// money, referências, status, failureCode, saldo resultante, tentativas,
-// próximo envio e timestamps"). Every key in the spec is always present;
-// fields that do not apply to a given row - external metadata on the
-// INTERNAL OPENING row, resultingBalance outside PROCESSED/REJECTED,
-// nextAttemptAt/pendingExpiresAt outside PENDING_REFERENCE - are sent as
-// explicit JSON null rather than omitted, so callers can tell "absent" from
-// "not applicable to this row".
+// read routes. Every key is always present; fields that do not apply to a
+// given row - external metadata on the INTERNAL OPENING row,
+// resultingBalance outside PROCESSED/REJECTED, nextAttemptAt and
+// pendingExpiresAt outside PENDING_REFERENCE - are sent as explicit JSON
+// null rather than omitted, so callers can tell "absent" from "not
+// applicable to this row".
 type transactionDetailResponse struct {
 	TransactionID                  string                         `json:"transactionId"`
 	ExternalTransactionID          *string                        `json:"externalTransactionId"`
@@ -63,11 +61,9 @@ func nullableString(value string) *string {
 }
 
 // utcPtr normalizes a nullable timestamp to UTC before serialization. pgx
-// hands back a TIMESTAMPTZ in whatever location the driver's default is -
-// this process's own local zone in the worst case - and json.Marshal renders
-// time.Time with its offset, not necessarily "Z"; encoding as anything but
-// UTC would violate the wire contract callers rely on (spec, "Contratos
-// HTTP": timestamps in RFC 3339 UTC).
+// hands back a TIMESTAMPTZ in whatever location the driver's default is,
+// and json.Marshal renders time.Time with its offset, not necessarily "Z";
+// anything but UTC would break the RFC 3339 UTC wire contract.
 func utcPtr(t *time.Time) *time.Time {
 	if t == nil {
 		return nil
@@ -90,8 +86,7 @@ func toTransactionDetailResponse(d *walletapp.TransactionDetail) transactionDeta
 
 // callerFromIdentity turns the request's verified identity into the
 // use case's own notion of caller - wallet-admin sees everything, a
-// provider only ever its own (spec, decision 7: "GET /wagering/transactions/:id
-// ... wallet-admin vê todas").
+// provider only ever its own.
 func callerFromIdentity(identity auth.Identity) walletapp.Caller {
 	return walletapp.Caller{ProviderID: identity.ProviderID, IsAdmin: identity.HasRole(auth.RoleWalletAdmin)}
 }

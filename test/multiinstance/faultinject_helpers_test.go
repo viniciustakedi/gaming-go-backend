@@ -46,20 +46,18 @@ func startWithEnv(t *testing.T, binary, logDir, name string, overrides map[strin
 // background loop, or the very next SQS message a "before-commit" or
 // "after-commit-before-delete" victim happens to receive) would otherwise
 // risk killing the victim on that stray row or message before it ever
-// reaches the one this scenario creates - observed in practice running
-// these scenarios with `-count=3` against the same infrastructure. It waits
-// on the drain instance's own outbox_pending_events and
-// pending_reference_active gauges reaching zero rather than a fixed sleep,
-// since how much of that backlog an earlier run left behind is not bounded;
-// SQS exposes no equivalent queue-depth metric through this application, so
-// sqsToo instead gives its consumer a few full receive cycles to empty
-// whatever is currently visible. The outbox wait in particular has to
-// outlast the full default OUTBOX_LEASE (30s): an earlier scenario's own
-// victim can die from an unrelated fault point (e.g. an SQS one) while its
-// background outbox publisher happens to be mid-claim on rows from that
-// same scenario's own wallet-opening, orphaning them under the default
-// lease until it naturally expires - observed in practice running this
-// package's full suite back to back.
+// reaches the one this scenario creates - observed running these scenarios
+// with `-count=3` against the same infrastructure. It waits on the drain
+// instance's own outbox_pending_events and pending_reference_active gauges
+// reaching zero rather than a fixed sleep, since how much of that backlog an
+// earlier run left behind is not bounded; SQS exposes no equivalent
+// queue-depth metric through this application, so sqsToo instead gives its
+// consumer a few full receive cycles to empty whatever is currently visible.
+// The outbox wait in particular has to outlast the full default OUTBOX_LEASE
+// (30s): an earlier scenario's victim can die from an unrelated fault point
+// while its background outbox publisher happens to be mid-claim on rows from
+// that same scenario's wallet-opening, orphaning them under the default lease
+// until it naturally expires.
 func drainBacklog(t *testing.T, binary, logDir string, sqsToo bool) *instance {
 	t.Helper()
 	expireForeignPendingReferences(t)
@@ -90,8 +88,7 @@ func drainBacklog(t *testing.T, binary, logDir string, sqsToo bool) *instance {
 // the default 24h REFERENCE_WORKER_TTL stamped into pending_expires_at when
 // they were inserted, so no configuration on the drain instance can retire
 // them, and every scenario here fails on the drain barrier. Running the
-// suites in the other order, or against a fresh database, hides it - which
-// is exactly why the delivery has to survive `integration` first.
+// suites in the other order, or against a fresh database, hides it.
 //
 // It is an UPDATE the wallet_app role already holds (the worker reschedules
 // these same rows), never a delete, and it only reaches rows left behind
@@ -110,9 +107,9 @@ func expireForeignPendingReferences(t *testing.T) {
 // bareMetricValue reads a single, unlabeled Prometheus metric (gauge or
 // counter) off inst's /metrics, failing the test if the series has not been
 // registered yet - a metric that has never been observed is not the same as
-// one legitimately reading zero (review, standards: treating an absent
-// series as 0 could let drainBacklog decide a backlog is empty when it has
-// simply never been measured).
+// one legitimately reading zero, and treating an absent series as 0 would let
+// drainBacklog decide a backlog is empty when it has simply never been
+// measured.
 func bareMetricValue(t *testing.T, inst *instance, name string) float64 {
 	t.Helper()
 	resp, body := doAt(t, inst, http.MethodGet, "/metrics", "", nil)
@@ -138,8 +135,7 @@ func bareMetricValue(t *testing.T, inst *instance, name string) float64 {
 // failing the test if timeout passes first - drainBacklog relies on this to
 // know the backlog is actually empty before releasing the victim; silently
 // giving up here would let a victim start with a pending backlog and crash
-// on the wrong item instead of the one this scenario created (review,
-// standards).
+// on the wrong item instead of the one this scenario created.
 func waitForGaugeZero(t *testing.T, inst *instance, name string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -183,11 +179,9 @@ func doExpectingCrash(t *testing.T, inst *instance, method, path, token string, 
 	if err == nil {
 		resp.Body.Close()
 	}
-	// Either outcome is acceptable here: a connection error (the common
-	// case, the process died before writing any response) or a response
-	// that happened to race the crash. The scenario's own assertions -
-	// waitExit plus the database read afterward - are what actually prove
-	// the fault point fired at the intended moment.
+	// Either outcome is acceptable: a connection error (the process died
+	// before writing any response) or a response that happened to race the
+	// crash.
 }
 
 // doWageringExpectingCrash posts a wagering operation to inst and tolerates
@@ -229,10 +223,9 @@ func waitForMetricAtLeast(t *testing.T, inst *instance, name string, want float6
 
 // requireNoOutputEvents peeks the output queue for window and fails the test
 // if any message whose eventId is in want appears - the proof that nothing
-// was actually confirmed on the wire before a rescuer starts, not merely
-// that Postgres's published_at was never set (review, correctness: a
-// published_at check alone would still pass if the victim had already sent
-// the event and only died before confirming it). Every receive sets
+// was actually sent on the wire before a rescuer starts. A published_at
+// check alone would still pass if the victim had already sent the event and
+// only died before confirming it. Every receive sets
 // VisibilityTimeout to 0, so a message peeked here stays (or becomes again)
 // immediately visible to whichever reader looks for it afterward - this
 // call must never consume a delivery a later assertion still needs.
@@ -267,13 +260,11 @@ func requireNoOutputEvents(t *testing.T, window time.Duration, want map[string]b
 // outputReader is a persistent, stateful reader of the output queue, used
 // where a scenario needs to observe two separate waves of delivery (before
 // and after a rescuer) as one continuous session: rawDeliveries is the
-// independent count of every delivery observed per eventId, applied
-// tracks which eventIds this reader has already treated as processed
-// exactly once - the reader-side dedup the ticket asks for - and payloads
-// keeps every raw body observed per eventId, so a same-eventId,
-// same-payload assertion can compare a republished delivery against the
-// original one byte for byte (spec: "outra instância republica com o mesmo
-// eventId e o mesmo payload").
+// independent count of every delivery observed per eventId, applied is the
+// reader-side dedup tracking which eventIds have already been treated as
+// processed exactly once, and payloads keeps every raw body observed per
+// eventId, so a same-eventId assertion can compare a republished delivery
+// against the original one byte for byte.
 type outputReader struct {
 	client        *sqs.Client
 	applied       map[string]bool
@@ -367,10 +358,9 @@ func instancePublishedEventIDs(t *testing.T, inst *instance) map[string]bool {
 	return ids
 }
 
-// startTrioWithEnv is startTrio (harness_test.go, ticket 15) with overrides
-// layered onto baseEnv - kept local to this ticket's own file rather than
-// changing startTrio itself, since scenarios from ticket 15 already depend
-// on its exact, override-free signature.
+// startTrioWithEnv is startTrio (harness_test.go) with overrides layered onto
+// baseEnv - kept separate rather than changing startTrio itself, whose
+// override-free signature other scenarios depend on.
 func startTrioWithEnv(t *testing.T, overrides map[string]string) []*instance {
 	t.Helper()
 	binary := buildBinary(t)
@@ -388,9 +378,8 @@ func startTrioWithEnv(t *testing.T, overrides map[string]string) []*instance {
 	return instances
 }
 
-// restartTrioWithEnv is restartTrio (harness_test.go, ticket 15) with
-// overrides layered onto baseEnv for the restarted instances - see
-// startTrioWithEnv.
+// restartTrioWithEnv is restartTrio (harness_test.go) with overrides layered
+// onto baseEnv for the restarted instances - see startTrioWithEnv.
 func restartTrioWithEnv(t *testing.T, instances []*instance, overrides map[string]string) []*instance {
 	t.Helper()
 	for _, inst := range instances {

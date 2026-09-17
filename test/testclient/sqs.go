@@ -16,8 +16,7 @@ import (
 )
 
 // SQSEndpoint, SQSRegion and SQSAccountID are the MiniStack connection
-// defaults both harnesses share (spec, seam 3: "o mesmo cliente de teste
-// roda em dois harnesses").
+// defaults both harnesses share.
 func SQSEndpoint() string { return EnvOrDefault("SQS_ENDPOINT_URL", "http://localhost:4566") }
 
 func SQSRegion() string { return EnvOrDefault("SQS_REGION", "us-east-1") }

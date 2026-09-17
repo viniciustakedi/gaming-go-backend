@@ -18,7 +18,7 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/internal/faultinject"
 )
 
-// Record is the immutable event snapshot and its delivery state returned by a claimed outbox row.
+// Record is an event snapshot and its delivery state from a claimed outbox row.
 type Record struct {
 	EventID    string
 	Payload    []byte
@@ -26,7 +26,8 @@ type Record struct {
 	OccurredAt time.Time
 }
 
-// Store is the publisher's durable outbox boundary. Its implementation owns transaction and database details.
+// Store is the publisher's durable outbox boundary; the implementation owns
+// the transaction and database details.
 type Store interface {
 	Claim(ctx context.Context, batch int, lease time.Duration) ([]Record, error)
 	MarkPublished(ctx context.Context, eventID string) error
@@ -34,7 +35,8 @@ type Store interface {
 	Stats(ctx context.Context) (pending int, oldest *time.Time, err error)
 }
 
-// Queue is the publisher's output boundary. The adapter maps the stable event identity and wallet group to its concrete FIFO client.
+// Queue is the publisher's output boundary. The adapter maps the event
+// identity and wallet group onto its concrete FIFO client.
 type Queue interface {
 	Send(ctx context.Context, payload []byte, groupID, deduplicationID string) error
 }
@@ -114,9 +116,8 @@ func (p *Publisher) run(ctx context.Context) {
 	}
 }
 
-// PublishBatch processes one bounded claimed batch. The lifecycle loop calls
-// it repeatedly; exposing the bounded operation makes delivery testable at
-// the Store and Queue seams without exposing database or queue clients.
+// PublishBatch processes one bounded claimed batch. Exposing the bounded
+// operation keeps delivery testable at the Store and Queue seams.
 func (p *Publisher) PublishBatch(ctx context.Context) error {
 	records, err := p.store.Claim(ctx, p.cfg.BatchSize, p.cfg.Lease)
 	if err != nil {
@@ -142,20 +143,16 @@ func (p *Publisher) publish(ctx context.Context, record Record) error {
 		}
 		return p.retry(ctx, record, fmt.Errorf("outbox: invalid committed payload: %w", err))
 	}
-	// The "after claim, before send" fault point (spec, "Injeção de falhas e
-	// ambiente"): record.EventID is already claimed (its lease pushed out by
-	// PublishBatch's Claim), so killing the process here just lets the lease
-	// expire and another instance's publisher claim and send it.
+	// The record is already claimed with its lease pushed out, so a crash
+	// here only lets the lease expire for another instance to claim and send.
 	faultinject.Trigger("after-outbox-claim-before-send")
 	if err := p.queue.Send(ctx, record.Payload, envelope.Data.WalletID, record.EventID); err != nil {
 		return p.retry(ctx, record, fmt.Errorf("outbox: send event %s: %w", record.EventID, err))
 	}
-	// The "after send, before confirmation" fault point (spec, "Injeção de
-	// falhas e ambiente"): the event already reached SQS under this eventId,
-	// so killing the process here leaves publishedAt unset; another instance
-	// republishes the same eventId once the lease expires, and the FIFO
-	// deduplication window (or the reader's own dedup by eventId once it has
-	// passed) keeps the confirmed delivery from ever being lost or doubled.
+	// The event already reached SQS under this eventId, so a crash here
+	// leaves publishedAt unset and another instance republishes the same
+	// eventId once the lease expires. FIFO deduplication, or the reader's
+	// own dedup by eventId past that window, keeps it from being doubled.
 	faultinject.Trigger("after-outbox-send-before-confirm")
 	if err := p.store.MarkPublished(ctx, record.EventID); err != nil {
 		p.recordStoreError("mark_published", record.EventID, err)

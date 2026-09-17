@@ -24,13 +24,12 @@ import (
 	"github.com/viniciustakedi/jungle-gaming-wallet/test/testclient"
 )
 
-// seam 3a - internal/app + internal/httpapi's real HTTP contract for
-// POST /wallets and GET /wallets/{walletId}, driven through appHarness
-// (apphttp_test.go) against the same Postgres and MiniStack every other
-// test in this package uses.
+// internal/app + internal/httpapi's real HTTP contract for POST /wallets and
+// GET /wallets/{walletId}, driven through appHarness (apphttp_test.go)
+// against the same Postgres and MiniStack every other test in this package
+// uses.
 
-// walletHTTPResponse and moneyJSON are test/testclient's shared DTOs (spec,
-// seam 3: "o mesmo cliente de teste roda em dois harnesses") -
+// walletHTTPResponse and moneyJSON are test/testclient's shared DTOs -
 // test/multiinstance uses the same types.
 type walletHTTPResponse = testclient.WalletHTTPResponse
 
@@ -102,7 +101,7 @@ type wagerTransactionProcessedPayload struct {
 // external-provider field is absent from the raw payload - not just empty
 // in the typed struct above, but genuinely missing, which is what the
 // domain event's `omitempty` tags promise for an internally originated
-// transaction (spec: "External fields are absent for OPENING").
+// transaction.
 func requireNoExternalMetadata(t *testing.T, raw []byte) {
 	t.Helper()
 	var decoded struct {
@@ -196,9 +195,7 @@ func countLedgerEntries(t *testing.T, ctx context.Context, h *appHarness, wallet
 
 // netLedgerBalance sums credits minus debits for a wallet, from the ledger
 // alone - the independent source of truth every financial scenario in this
-// package checks the stored balance against (spec: "Todo cenário financeiro
-// termina conferindo o saldo armazenado contra a soma de créditos menos
-// débitos do ledger").
+// package checks the stored balance against.
 func netLedgerBalance(t *testing.T, ctx context.Context, h *appHarness, walletID string) int64 {
 	t.Helper()
 	var net int64
@@ -332,9 +329,8 @@ func TestOpenWallet_PositiveBalance_RecordsOpeningLedgerAndOutboxInSameCommit(t 
 	requireNoExternalMetadata(t, processedEvents[0].payload)
 }
 
-// TestOpenWallet_PositiveBalance_PublishesCommittedOutboxSnapshots exercises
-// seam 3a end to end: the opening commit creates both durable snapshots, and
-// the events-reader receives exactly those snapshots from the output FIFO.
+// The opening commit creates both durable snapshots, and the events-reader
+// receives exactly those snapshots from the output FIFO.
 func TestOpenWallet_PositiveBalance_PublishesCommittedOutboxSnapshots(t *testing.T) {
 	h := newAppHarness(t)
 	ctx := context.Background()
@@ -583,9 +579,9 @@ func TestGetWallet_NotFound(t *testing.T) {
 // separate connection while the app - configured with a short
 // DATABASE_LOCK_TIMEOUT for this test only - tries to INSERT into it. The
 // wait queues behind the lock and lock_timeout fires, giving the app a
-// genuine Postgres error unrelated to any constraint this ticket already
-// classifies as a conflict, which is exactly the "anything else is
-// transient" case internal/walletapp.OpenWalletUseCase.Open falls back to.
+// genuine Postgres error unrelated to any constraint it classifies as a
+// conflict - the "anything else is transient" case
+// internal/walletapp.OpenWalletUseCase.Open falls back to.
 func TestOpenWallet_TransientDatabaseFailure_PersistsNothing(t *testing.T) {
 	t.Setenv("DATABASE_LOCK_TIMEOUT", "300ms")
 	h := newAppHarness(t)
@@ -655,12 +651,10 @@ func (f *failingSecondOutboxRepository) Insert(ctx context.Context, record walle
 	return f.real.Insert(ctx, record)
 }
 
-// TestOpenWallet_SecondOutboxInsertFails_RollsBackWalletTransactionLedgerAndOutbox
-// proves the one scenario no other test in this package exercises: the
-// second outbox INSERT (WalletBalanceChanged) failing after the wallet, the
+// The second outbox INSERT (WalletBalanceChanged) fails after the wallet, the
 // OPENING transaction, its ledger entry and the first outbox record
 // (WagerTransactionProcessed) have already been written inside the same
-// transaction. If any of those four survived a rollback, the row counts
+// transaction. If any of those four survived the rollback, the row counts
 // below would differ before and after this call.
 func TestOpenWallet_SecondOutboxInsertFails_RollsBackWalletTransactionLedgerAndOutbox(t *testing.T) {
 	h := newAppHarness(t)

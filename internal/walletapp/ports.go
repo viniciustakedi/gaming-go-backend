@@ -1,11 +1,9 @@
 // Package walletapp is the application layer for wallet use cases: it
-// depends only on the pure domain (internal/domain/wallet,
-// internal/domain/money, internal/domain/operation), never on a concrete
-// Postgres adapter, pgx, Fx or HTTP - those live one layer out, in
-// internal/walletpg and internal/httpapi (spec: "Camadas: Domínio puro ->
-// aplicação -> adaptadores -> composição"). The unit of work and every
-// repository are ports this package declares and internal/walletpg
-// implements; nothing here imports internal/pg.
+// depends only on the pure domain, never on a concrete Postgres adapter,
+// pgx, Fx or HTTP - those live one layer out, in internal/walletpg and
+// internal/httpapi. The unit of work and every repository are ports this
+// package declares and internal/walletpg implements; nothing here imports
+// internal/pg.
 package walletapp
 
 import (
@@ -17,38 +15,35 @@ import (
 	domainwallet "github.com/viniciustakedi/jungle-gaming-wallet/internal/domain/wallet"
 )
 
-// ErrNotFound is returned by WalletRepository.FindByID/FindForUpdate and by
-// WagerTransactionRepository's two lookups when no row matches. It is a
-// repository-level sentinel, not an HTTP-facing failure code: the use case
-// is what translates it to the right operation.Error, keeping this
-// package's repositories ignorant of the HTTP error catalog.
+// ErrNotFound is returned by the repository lookups when no row matches. It
+// is a repository-level sentinel, not an HTTP-facing failure code: the use
+// case translates it to the right operation.Error, keeping repositories
+// ignorant of the HTTP error catalog.
 var ErrNotFound = errors.New("walletapp: not found")
 
 // ErrAlreadyExists is returned by WalletRepository.Insert when the
 // (playerId, currency) pair already has a wallet - detected by the
-// database's own unique constraint, which is also what makes concurrent
-// opens for the same pair safe: only one INSERT can win.
+// database's own unique constraint, which is what makes concurrent opens
+// for the same pair safe: only one INSERT can win.
 var ErrAlreadyExists = errors.New("walletapp: wallet already exists")
 
 // ErrForbiddenProvider is returned by GetTransactionUseCase.ByProviderExternalID
 // when an authenticated provider asks about a route providerId that is not
-// its own (spec: "GET /providers/:providerId/...: provider com providerId
-// diferente devolve 403"). Unlike ErrNotFound, this deliberately does not
-// hide the route's shape - the providerId itself is not secret, only the
-// transactions scoped under it are - so the HTTP layer answers 403, not 404.
+// its own. Unlike ErrNotFound, this deliberately does not hide the route's
+// shape - the providerId itself is not secret, only the transactions scoped
+// under it are - so the HTTP layer answers 403, not 404.
 var ErrForbiddenProvider = errors.New("walletapp: caller's providerId does not match the route")
 
 // ErrConcurrencyConflict is returned by WalletRepository.UpdateBalance when
 // the row's version no longer matches the one the caller read under its own
-// FOR UPDATE lock. This is defense in depth (spec: "as garantias no banco
-// independem do lock") - it is never expected to fire in practice, since the
-// lock is held for the whole processing attempt.
+// FOR UPDATE lock. Defense in depth: it is never expected to fire in
+// practice, since the lock is held for the whole processing attempt.
 var ErrConcurrencyConflict = errors.New("walletapp: wallet version changed concurrently")
 
 // Repositories bundles every repository port a unit of work hands to the
 // function passed to UnitOfWork.WithinTx, all bound to that same
-// transaction so a use case never has to thread a transaction handle
-// through its own arguments.
+// transaction, so a use case never threads a transaction handle through its
+// own arguments.
 type Repositories struct {
 	Wallets      WalletRepository
 	Transactions WagerTransactionRepository
@@ -58,9 +53,8 @@ type Repositories struct {
 
 // UnitOfWork is the one port every write use case in this package depends
 // on. WithinTx runs fn inside exactly one transaction, handing it
-// repositories bound to that transaction; a fake in a unit test can run fn
-// directly, with repositories of its own choosing, and never needs a real
-// Postgres.
+// repositories bound to that transaction; a fake can run fn directly and
+// never needs a real Postgres.
 type UnitOfWork interface {
 	WithinTx(ctx context.Context, fn func(ctx context.Context, repos Repositories) error) error
 }
@@ -70,8 +64,7 @@ type WalletRepository interface {
 	Insert(ctx context.Context, w *domainwallet.Wallet) error
 	FindByID(ctx context.Context, id string) (*domainwallet.Wallet, error)
 	// FindForUpdate reads the wallet row locked with SELECT ... FOR UPDATE,
-	// so the caller has exclusive use of it for the rest of its transaction
-	// (spec, decision 3: "SELECT ... FOR UPDATE na linha da carteira").
+	// so the caller has exclusive use of it for the rest of its transaction.
 	FindForUpdate(ctx context.Context, id string) (*domainwallet.Wallet, error)
 	// UpdateBalance persists w's current balance and version, conditioned on
 	// previousVersion - the version the caller read at lock time - and
@@ -80,14 +73,11 @@ type WalletRepository interface {
 }
 
 // TransactionDetail is the full read-only projection of one wager
-// transaction row (spec, "Contratos HTTP": "registro completo: ids, tipo,
-// money, referências, status, failureCode, saldo resultante, tentativas,
-// próximo envio e timestamps"). ExternalTransactionID, ProviderID, RoundID
-// and GameID are empty for an INTERNAL row - only OPENING is ever INTERNAL,
-// and it carries none of them (spec, migration 0004). ResultingBalance is
-// nil except for PROCESSED and REJECTED, and NextAttemptAt/PendingExpiresAt
-// are nil except for PENDING_REFERENCE, mirroring the same columns'
-// terminal-status CHECK constraints.
+// transaction row. ExternalTransactionID, ProviderID, RoundID and GameID are
+// empty for an INTERNAL row - only OPENING is ever INTERNAL, and it carries
+// none of them. ResultingBalance is nil except for PROCESSED and REJECTED,
+// and NextAttemptAt/PendingExpiresAt are nil except for PENDING_REFERENCE,
+// mirroring the same columns' terminal-status CHECK constraints.
 type TransactionDetail struct {
 	TransactionID                  string
 	ExternalTransactionID          string
@@ -112,10 +102,8 @@ type TransactionDetail struct {
 }
 
 // ExistingTransaction is the persisted state of an external wager
-// transaction, read back either to classify an idempotency attempt
-// (IdempotencyKey, PayloadHash, ExternalTransactionID feed
-// operation.ClassifyAttempt) or, on replay, to answer with the exact result
-// the original processing computed (Status, FailureCode, ResultingBalance).
+// transaction, read back either to classify an idempotency attempt or, on
+// replay, to answer with the exact result the original processing computed.
 type ExistingTransaction struct {
 	TransactionID         string
 	IdempotencyKey        string
@@ -139,22 +127,19 @@ type PendingReferenceTransaction struct {
 }
 
 // WagerTransactionRepository persists and looks up a wager transaction.
-// resultingBalance is nil for statuses that never carry one (spec:
-// wager_transactions_resulting_balance_terminal_check).
+// resultingBalance is nil for statuses that never carry one.
 type WagerTransactionRepository interface {
 	// Insert writes an already-terminal row unconditionally - used only for
-	// the OPENING credit, which never competes with anything on the two
-	// idempotency unique constraints (both columns are NULL for an
-	// INTERNAL row).
+	// the OPENING credit, which never competes on the two idempotency unique
+	// constraints (both columns are NULL for an INTERNAL row).
 	Insert(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) error
 	// InsertNew writes one external wager_transactions row, silently doing
 	// nothing if a concurrent writer already committed the same
 	// (providerId, idempotencyKey) or (providerId, externalTransactionId)
 	// pair - the backstop for a duplicate that used a different walletId in
-	// its body and so never contended for the same FOR UPDATE lock (spec,
-	// decision 3, step 5: "INSERT ... ON CONFLICT DO NOTHING"). inserted
-	// reports which of the two happened, so the caller knows whether it
-	// must roll back and reclassify in a fresh transaction.
+	// its body and so never contended for the same FOR UPDATE lock. inserted
+	// reports which of the two happened, so the caller knows whether it must
+	// roll back and reclassify in a fresh transaction.
 	InsertNew(ctx context.Context, t *domainwallet.WagerTransaction, resultingBalance *int64) (inserted bool, err error)
 	// InsertPending persists a newly accepted out-of-order operation and its
 	// retry schedule in the same transaction as its pending-reference event.
@@ -164,20 +149,19 @@ type WagerTransactionRepository interface {
 	// FindByIdempotencyKey and FindByExternalTransactionID each return
 	// ErrNotFound when no row matches; both are scoped to providerID, since
 	// idempotency keys and external transaction ids are only unique per
-	// provider (spec: "o escopo de chaves é por provedor").
+	// provider.
 	FindByIdempotencyKey(ctx context.Context, providerID, idempotencyKey string) (*ExistingTransaction, error)
 	FindByExternalTransactionID(ctx context.Context, providerID, externalTransactionID string) (*ExistingTransaction, error)
 	// FindReference resolves the transaction a REFUND, ROLLBACK or a
 	// referenced WIN names, scoped to the same provider the operation
-	// itself came from (spec: "a referência é resolvida por (providerId,
-	// referenceExternalTransactionId)"). It returns ErrNotFound when no
-	// such transaction has arrived yet; the caller - not this port -
-	// decides what an unresolved reference means.
+	// itself came from. It returns ErrNotFound when no such transaction has
+	// arrived yet; the caller - not this port - decides what an unresolved
+	// reference means.
 	FindReference(ctx context.Context, providerID, referenceExternalTransactionID string) (*domainwallet.WagerTransaction, error)
 	// ExistsSuccessfulReversal reports whether referenceTransactionID
-	// already has a PROCESSED REFUND or ROLLBACK against it (spec: "uma
-	// BET aceita uma única reversão bem-sucedida"). Only meaningful once
-	// the reference itself is PROCESSED.
+	// already has a PROCESSED REFUND or ROLLBACK against it: a BET accepts a
+	// single successful reversal. Only meaningful once the reference itself
+	// is PROCESSED.
 	ExistsSuccessfulReversal(ctx context.Context, referenceTransactionID string) (bool, error)
 	// FindPendingForUpdate rereads a claimed record after its wallet lock is
 	// held. It must lock the transaction row, preventing an expired lease from
@@ -193,16 +177,14 @@ type WagerTransactionRepository interface {
 	// FindDetailByID returns the full record for the internal transaction
 	// id, unscoped by provider - GetTransactionUseCase.ByID applies the
 	// isolation rule itself, since only it knows whether the caller is
-	// wallet-admin (spec: "wallet-admin vê todas, inclusive OPENING").
-	// Returns ErrNotFound when no row matches.
+	// wallet-admin. Returns ErrNotFound when no row matches.
 	FindDetailByID(ctx context.Context, id string) (*TransactionDetail, error)
 	// FindDetailByProviderExternalID returns the full record for one
 	// provider's externalTransactionId, scoped by providerID the same way
-	// every other external lookup in this package is (spec: "o escopo de
-	// chaves é por provedor"). providerID is the route's own providerId,
-	// not necessarily the caller's - GetTransactionUseCase.ByProviderExternalID
-	// decides whether the caller may ask about it before this is ever
-	// called. Returns ErrNotFound when no row matches.
+	// every other external lookup in this package is. providerID is the
+	// route's own providerId, not necessarily the caller's -
+	// GetTransactionUseCase.ByProviderExternalID decides whether the caller
+	// may ask about it. Returns ErrNotFound when no row matches.
 	FindDetailByProviderExternalID(ctx context.Context, providerID, externalTransactionID string) (*TransactionDetail, error)
 }
 
@@ -264,23 +246,17 @@ type OutboxRepository interface {
 }
 
 // OperationMetrics records the observability signals ProcessOperationUseCase
-// emits for every attempt, regardless of channel (HTTP today; SQS once
-// ticket 13 reuses this use case). It is a port, not a direct
+// emits for every attempt, regardless of channel. It is a port, not a direct
 // prometheus/client_golang dependency, so this package stays free of a
-// concrete metrics library (spec: "Camadas"); internal/wageringmetrics
-// implements it.
+// concrete metrics library; internal/wageringmetrics implements it.
 type OperationMetrics interface {
 	// ObserveOperation records one attempt's outcome and how long it took,
-	// labeled by channel, operation kind and resulting status (spec:
-	// "operações por canal, tipo e estado" and "histograma de latência de
-	// processamento").
+	// labeled by channel, operation kind and resulting status.
 	ObserveOperation(channel, kind, status string, duration time.Duration)
-	// ObserveDuplicate records one idempotent replay, by channel (spec:
-	// "duplicatas por canal").
+	// ObserveDuplicate records one idempotent replay, by channel.
 	ObserveDuplicate(channel string)
 	// ObserveConcurrencyConflict records one detected concurrency conflict:
-	// the step-5 INSERT backstop finding nothing to insert, or the wallet's
-	// version check failing on UPDATE (spec: "um conflito de concorrência
-	// detectado ... incrementa uma métrica").
+	// the INSERT backstop finding nothing to insert, or the wallet's version
+	// check failing on UPDATE.
 	ObserveConcurrencyConflict()
 }

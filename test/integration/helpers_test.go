@@ -24,9 +24,9 @@ import (
 
 const defaultOwnerDSN = "postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable"
 
-// Postgres SQLSTATE codes this package asserts on directly - decision 8 of
-// the alignment restricts this repository's dependencies, and pgerrcode is
-// not among them, so these are spelled out by hand instead of imported.
+// Postgres SQLSTATE codes this package asserts on directly - pgerrcode is not
+// one of this repository's allowed dependencies, so these are spelled out by
+// hand instead of imported.
 // See https://www.postgresql.org/docs/current/errcodes-appendix.html.
 const (
 	sqlstateCheckViolation        = "23514"
@@ -51,9 +51,9 @@ func ownerDSN(t *testing.T) string {
 }
 
 // appDSN reuses ownerDSN's host, port, database and sslmode, and swaps in
-// wallet_app's own credentials - the role every seam 2 scenario in this
-// package connects as, per the ticket ("SQL cru executado pelo papel da
-// aplicação"). Deriving it from DATABASE_URL instead of a second env var
+// wallet_app's own credentials - the role the schema scenarios in this
+// package connect as, so their raw SQL runs with the application's own
+// privileges. Deriving it from DATABASE_URL instead of a second env var
 // means these tests need no configuration beyond what the rest of the
 // suite already requires. The password itself is never versioned or
 // hardcoded here: it is generated and reused by
@@ -189,9 +189,8 @@ func newID(t *testing.T, prefix string) string {
 	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(buf[:]))
 }
 
-// newUUID is test/testclient's shared UUID generator (spec, seam 3: "o
-// mesmo cliente de teste roda em dois harnesses") - test/multiinstance uses
-// the same function.
+// newUUID is test/testclient's shared UUID generator - test/multiinstance
+// uses the same function.
 func newUUID(t *testing.T) string {
 	t.Helper()
 	return testclient.NewUUID(t)

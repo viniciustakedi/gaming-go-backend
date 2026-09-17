@@ -16,20 +16,16 @@ import (
 
 // Verifier turns a raw bearer token into the Identity it carries, or an
 // error for anything that fails signature, issuer, audience or expiry
-// checks. internal/httpapi is the only caller: it never inspects the token
-// itself, only this interface.
+// checks.
 type Verifier interface {
 	Verify(ctx context.Context, rawToken string) (Identity, error)
 }
 
 // keycloakClaims mirrors the token shapes this service reads out of an
-// otherwise-opaque access token: the realm roles Keycloak's built-in "roles"
-// mapper embeds under realm_access.roles, the provider_id hardcoded claim
-// the wallet realm's provider clients carry (spec, decision 7), and the
-// exp/nbf/iat time claims Verify checks itself (see validateTimes). None of
-// these fields is required to be present - a role-less client's token has
-// no realm_access at all, only provider-a/provider-b carry provider_id, and
-// nbf/iat are optional per the JWT spec.
+// otherwise-opaque access token: the realm roles under realm_access.roles,
+// the provider_id claim the realm's provider clients carry, and the
+// exp/nbf/iat claims validateTimes checks. None of these fields is required
+// to be present.
 type keycloakClaims struct {
 	RealmAccess struct {
 		Roles []string `json:"roles"`
@@ -43,43 +39,36 @@ type keycloakClaims struct {
 // OIDCVerifier is the production Verifier, backed by a real Keycloak
 // discovered over OIDC. It is safe to use as soon as RegisterLifecycle's
 // OnStart hook has completed discovery; before that, the zero value's nil
-// idVerifier makes Verify fail closed rather than panic, which only matters
-// if something calls it before Fx has finished starting the app.
+// idVerifier makes Verify fail closed rather than panic.
 type OIDCVerifier struct {
 	mu         sync.RWMutex
 	idVerifier *oidc.IDTokenVerifier
 	clockSkew  time.Duration
 	// clock is the injectable "now" validateTimes checks exp/nbf/iat
-	// against - time.Now in production, overridden directly by this
-	// package's own tests (verifier_test.go), which can reach the
-	// unexported field since they live in the same package.
+	// against - time.Now in production, overridden by this package's own
+	// tests.
 	clock func() time.Time
 }
 
 // NewOIDCVerifier builds an OIDCVerifier with no I/O - discovery happens
-// later, in RegisterLifecycle's OnStart hook. Kept as a constructor with no
-// Fx dependencies of its own so it can be provided before config's OnStart
-// ordering with httpapi (see internal/auth.Module and internal/app.Modules)
-// is even relevant.
+// later, in RegisterLifecycle's OnStart hook.
 func NewOIDCVerifier() *OIDCVerifier {
 	return &OIDCVerifier{clock: time.Now}
 }
 
 // asVerifier exposes *OIDCVerifier through the Verifier interface, so
 // internal/httpapi.New can depend on the interface rather than this
-// package's concrete OIDC implementation.
+// package's concrete implementation.
 func asVerifier(v *OIDCVerifier) Verifier {
 	return v
 }
 
 var errVerifierNotReady = errors.New("auth: oidc verifier not ready (discovery has not completed)")
 
-// Verify checks rawToken's signature (RS256, JWKS with cache via go-oidc's
-// RemoteKeySet), issuer and audience via go-oidc, then its exp/nbf/iat
-// itself via validateTimes (see RegisterLifecycle's SkipExpiryCheck), and
-// decodes its realm roles and provider_id claim into an Identity. It does
-// not enforce any role or provider_id policy itself - that is
-// internal/httpapi's authorization concern, applied after Verify succeeds.
+// Verify checks rawToken's signature, issuer and audience via go-oidc, then
+// its exp/nbf/iat itself via validateTimes, and decodes its realm roles and
+// provider_id claim into an Identity. It enforces no role or provider_id
+// policy - that is internal/httpapi's concern, applied after Verify succeeds.
 func (v *OIDCVerifier) Verify(ctx context.Context, rawToken string) (Identity, error) {
 	v.mu.RLock()
 	idVerifier := v.idVerifier
@@ -113,13 +102,10 @@ func (v *OIDCVerifier) Verify(ctx context.Context, rawToken string) (Identity, e
 
 // validateTimes enforces exp, nbf and iat itself rather than relying on
 // go-oidc's built-in expiry check (RegisterLifecycle sets SkipExpiryCheck:
-// true). go-oidc's own check hardcodes a 5-minute leeway on nbf regardless
-// of the configured clock skew
-// (github.com/coreos/go-oidc/v3@v3.11.0/oidc/verify.go:301), which would
-// accept a token up to 5 minutes before it is actually valid - far looser
-// than this service's configured tolerance (ticket 07 review: "um JWT
-// RS256 genuino... com nbf = agora + 4 min... e aceito"). exp is required;
-// nbf and iat are only checked when the token carries them.
+// true). go-oidc's own check hardcodes a 5-minute leeway on nbf regardless of
+// the configured clock skew, which would accept a token up to 5 minutes
+// before it is actually valid - far looser than this service's configured
+// tolerance. exp is required; nbf and iat are checked only when present.
 func validateTimes(claims keycloakClaims, now time.Time, clockSkew time.Duration) error {
 	if claims.Expiry == nil {
 		return errors.New("auth: token carries no exp claim")
@@ -148,17 +134,12 @@ func (v *OIDCVerifier) setVerifier(idVerifier *oidc.IDTokenVerifier, clockSkew t
 }
 
 // RegisterLifecycle discovers the Keycloak realm's OIDC configuration
-// (issuer, JWKS endpoint) on start, retrying with a short fixed backoff
-// until either discovery succeeds or cfg.Auth.DiscoveryTimeout elapses
-// (ticket 07: "Descoberta OIDC no start hook, com retry limitado ao prazo de
-// start") - Keycloak's own boot, including the realm import this ticket adds
-// to the Compose file, routinely takes longer than the app's other
-// dependencies, so a single attempt would make every cold `docker compose
-// up` a race. The resulting *oidc.IDTokenVerifier already carries JWKS
-// caching (go-oidc's RemoteKeySet) and is pinned to RS256 and the
-// configured audience; SupportedSigningAlgs is set explicitly rather than
-// left to the provider's advertised default so a misconfigured Keycloak
-// realm can never widen this to an insecure algorithm.
+// (issuer, JWKS endpoint) on start, retrying with a short fixed backoff until
+// discovery succeeds or cfg.Auth.DiscoveryTimeout elapses - Keycloak's own
+// boot routinely takes longer than the app's other dependencies, so a single
+// attempt would make every cold start a race. SupportedSigningAlgs is set
+// explicitly rather than left to the provider's advertised default, so a
+// misconfigured realm can never widen this to an insecure algorithm.
 //
 // SkipExpiryCheck is set because go-oidc's own exp/nbf check cannot be
 // trusted with this service's clock-skew tolerance (see validateTimes) -
@@ -188,25 +169,19 @@ func RegisterLifecycle(lc fx.Lifecycle, v *OIDCVerifier, cfg config.Config, logg
 	})
 }
 
-// discoverWithRetry keeps calling oidc.NewProvider against discoveryURL
-// until it succeeds or ctx is done, each attempt making its own HTTP round
-// trip against that host's well-known configuration endpoint; a connection
-// refused (Keycloak still booting) is retried, everything else about ctx's
-// own deadline is what ultimately bounds how long start can take.
+// discoverWithRetry keeps calling oidc.NewProvider against discoveryURL until
+// it succeeds or ctx is done; a connection refused (Keycloak still booting)
+// is retried, and ctx's deadline bounds how long start can take.
 //
-// discoveryURL and issuerURL are deliberately allowed to differ (ticket 07:
-// "separe issuer esperado de URL de descoberta e JWKS") - the app container
-// reaches Keycloak for discovery/JWKS over the Compose network
-// (http://keycloak:8080/...), while the token's own "iss" claim, which the
-// realm's KC_HOSTNAME makes identical for every caller regardless of how
-// they reached Keycloak, is the publicly reachable issuer
-// (http://localhost:<port>/...). oidc.InsecureIssuerURLContext is go-oidc's
-// documented mechanism for exactly this split: it does not weaken the
-// token's own issuer check - the resulting *oidc.Provider still pins its
-// issuer to issuerURL, and IDTokenVerifier.Verify still rejects any token
-// whose "iss" does not match it byte for byte - it only skips comparing
-// issuerURL against the discovery document's self-reported issuer field,
-// which this service's own Keycloak configuration already guarantees match.
+// discoveryURL and issuerURL are deliberately allowed to differ: the app
+// container reaches Keycloak for discovery/JWKS over the Compose network
+// (http://keycloak:8080/...), while the token's own "iss" claim is the
+// publicly reachable issuer (http://localhost:<port>/...).
+// oidc.InsecureIssuerURLContext is go-oidc's documented mechanism for that
+// split and does not weaken the token's issuer check - the provider stays
+// pinned to issuerURL and Verify still rejects any token whose "iss" does not
+// match byte for byte; it only skips comparing issuerURL against the
+// discovery document's self-reported issuer field.
 func discoverWithRetry(ctx context.Context, discoveryURL, issuerURL string) (*oidc.Provider, error) {
 	const backoff = 250 * time.Millisecond
 
