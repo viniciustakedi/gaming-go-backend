@@ -767,3 +767,52 @@ existe no MiniStack (filas, usuários, chaves) e no Postgres (a senha de
 `wallet_app`) em vez de falhar ou rotacionar. A suíte de integração continua
 passando depois de uma segunda subida, com as mesmas credenciais ou com
 credenciais reaproveitadas - nunca rotacionadas sem necessidade.
+
+## Como esta entrega foi construída
+
+O desafio foi implementado em três dias corridos (14 a 16 de setembro de
+2026), com desenvolvimento assistido por IA sob coordenação humana. Esta
+seção descreve o processo, as decisões que ele produziu e como cada uma foi
+verificada, para que tudo possa ser discutido numa call de review.
+
+**Especificação antes de código.** O enunciado virou primeiro uma
+especificação de desenho (dinheiro, máquina de estados, idempotência, locks,
+referências, inbox/outbox, autenticação, observabilidade e decisões de
+teste) e, a partir dela, 17 tickets em ordem de dependência, cada um com
+critérios de aceite verificáveis e as seções da spec que precisava atender.
+Nenhum ticket começou sem saber o que provaria ao terminar.
+
+**Duas frentes de implementação, em modelos diferentes.** Cada ticket foi
+implementado por um agente isolado, na sua própria worktree e branch:
+Claude Sonnet 5 nos tickets de esqueleto, banco, HTTP, autenticação,
+reversões, leituras, harness multi-instância, recuperação de falhas e
+documentação; Codex GPT-5.6 nos tickets de `Money`, domínio, regras e hash
+de idempotência, outbox, consumidor SQS, ledger e referências pendentes.
+
+**Revisão sempre por outra família de modelo.** Nenhum agente revisou o
+próprio trabalho nem o de um colega do mesmo modelo. Os tickets fundacionais
+ou de maior risco passaram por um painel de quatro lentes independentes
+(aderência à spec, padrões do repositório, corretude e segurança); os demais,
+por uma passada combinada. Achados Critical e Major bloqueavam o merge:
+o ticket voltava para correção e depois para uma nova revisão, que
+precisava confirmar item a item. Ao todo foram 59 relatórios de revisão e
+127 achados.
+
+**O que a revisão pegou.** Entre outros: uma senha de banco versionada numa
+migration; um Keycloak com administrador exposto; a credencial do dono do
+banco no ambiente da aplicação; uma estrutura de operação preparada que
+podia ser forjada fora do caso de uso; um lease de outbox que usava o
+relógio do processo em vez do relógio do Postgres; um `stop()` que retornava
+antes dos workers terminarem; e cenários de injeção de falha que passariam
+mesmo sem a garantia que alegavam provar.
+
+**Verificação final como um avaliador faria.** A entrega foi verificada a
+partir de um clone limpo, rodando os comandos deste README na ordem em que
+eles aparecem: `gofmt`, `go vet` nas quatro combinações de build tags,
+`staticcheck`, `go test`, `go test -race`, `docker compose up --build`, a
+suíte de integração, a suíte multi-instância com os sete cenários de morte
+de processo e, por fim, os exemplos de chamada autenticada colados daqui.
+Essa passada encontrou três defeitos que nenhuma suíte via isoladamente -
+testes de configuração presos ao ambiente do shell, uma dependência de ordem
+entre as suítes e um cenário com prazo menor que o lease padrão - todos
+corrigidos antes da entrega.
